@@ -106,6 +106,38 @@ func TestSaltOfReturnsHeaderValues(t *testing.T) {
 	}
 }
 
+func TestSaltOfRejectsHostileKDFParams(t *testing.T) {
+	salt, _ := NewSalt()
+	key := DeriveKey([]byte("pw"), salt, fastParams)
+	good, err := Seal(key, []byte("x"), fastParams, salt)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(b []byte)
+	}{
+		{"zero time cost panics argon2", func(b []byte) { binary.BigEndian.PutUint32(b[6:10], 0) }},
+		{"zero threads panics argon2", func(b []byte) { b[14] = 0 }},
+		{"absurd memory cost would exhaust RAM", func(b []byte) { binary.BigEndian.PutUint32(b[10:14], 1<<22) }},
+		{"absurd time cost would hang", func(b []byte) { binary.BigEndian.PutUint32(b[6:10], 1<<20) }},
+		{"memory cost below argon2 minimum", func(b []byte) { binary.BigEndian.PutUint32(b[10:14], 1) }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			blob := append([]byte(nil), good...)
+			tt.mutate(blob)
+			if _, _, err := SaltOf(blob); !errors.Is(err, ErrBadVault) {
+				t.Errorf("SaltOf() error = %v, want ErrBadVault", err)
+			}
+			if _, err := Open(key, blob); !errors.Is(err, ErrBadVault) {
+				t.Errorf("Open() error = %v, want ErrBadVault", err)
+			}
+		})
+	}
+}
+
 const goldenPassword = "correct horse battery staple"
 const goldenPlaintext = `{"version":1,"bookmarks":[{"id":"aaaaaaaa","url":"https://example.com/","added":"2026-09-27T00:00:00Z"}]}`
 

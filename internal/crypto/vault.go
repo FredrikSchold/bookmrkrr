@@ -88,17 +88,41 @@ func Seal(key, plaintext []byte, p Params, salt []byte) ([]byte, error) {
 	return append(h, aead.Seal(nil, nonce, plaintext, h)...), nil
 }
 
+// Cost bounds for the parameters read out of a vault header. They are wide
+// enough that any honest vault fits - Default sits in the middle of every
+// range - and narrow enough to contain a hostile file.
+const (
+	minTime, maxTime           = 1, 64
+	minThreads, maxThreads     = 1, 64
+	minMemoryKiB, maxMemoryKiB = 8, 1024 * 1024 // 1 GiB ceiling
+)
+
 // SaltOf reads the salt and KDF parameters from a vault blob so a caller can
 // derive the key from a password without first decrypting anything.
+//
+// The header is cleartext, so these bytes are attacker-controlled until Open
+// authenticates them - and a caller must feed them to DeriveKey before Open can
+// run. The bounds check is therefore load-bearing rather than cosmetic:
+// argon2.IDKey panics outright on a zero time or thread count, and it allocates
+// MemoryKiB up front, so an unchecked uint32 lets a single crafted file crash
+// the process or claim 4 TiB of RAM. Out-of-range costs are impossible in a
+// vault this code wrote, so they mean the same thing as a bad tag: ErrBadVault,
+// and nothing more specific that a caller could learn from.
 func SaltOf(blob []byte) ([]byte, Params, error) {
 	if len(blob) < headerLen || string(blob[:len(magic)]) != magic || blob[5] != Version {
 		return nil, Params{}, ErrBadVault
 	}
-	return blob[15:31], Params{
+	p := Params{
 		Time:      binary.BigEndian.Uint32(blob[6:10]),
 		MemoryKiB: binary.BigEndian.Uint32(blob[10:14]),
 		Threads:   blob[14],
-	}, nil
+	}
+	if p.Time < minTime || p.Time > maxTime ||
+		p.Threads < minThreads || p.Threads > maxThreads ||
+		p.MemoryKiB < minMemoryKiB || p.MemoryKiB > maxMemoryKiB {
+		return nil, Params{}, ErrBadVault
+	}
+	return blob[15:31], p, nil
 }
 
 // Open authenticates and decrypts a vault blob.
