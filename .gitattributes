@@ -1,0 +1,16 @@
+# Go tooling assumes LF. Without this, a Windows checkout converts *.go to
+# CRLF and `gofmt -l` reports every file as unformatted, which trains people
+# to ignore the one check that catches real formatting drift.
+*.go text eol=lf
+go.mod text eol=lf
+go.sum text eol=lf
+
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf
+LICENSE text eol=lf
+
+# The golden vault fixture pins format version 1 forever. Byte-exact or useless.
+*.bkmr binary
