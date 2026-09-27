@@ -47,3 +47,18 @@ func TestPlatformDataBaseIsNotEmpty(t *testing.T) {
 		t.Error("platformDataBase() = empty string, want a platform default")
 	}
 }
+
+func TestConfigPathHonorsDataDirOverride(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BKMR_DATA_DIR", dir)
+	t.Setenv("APPDATA", filepath.Join(t.TempDir(), "should-not-be-used"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "should-not-be-used"))
+
+	got, err := ConfigPath()
+	if err != nil {
+		t.Fatalf("ConfigPath() error = %v", err)
+	}
+	if want := filepath.Join(dir, "config.toml"); got != want {
+		t.Errorf("ConfigPath() = %q, want %q", got, want)
+	}
+}

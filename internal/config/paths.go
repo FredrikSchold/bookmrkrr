@@ -33,22 +33,26 @@ func DataDir() (string, error) {
 	return dir, nil
 }
 
-// ConfigPath returns the full path to config.toml.
+// ConfigPath returns the full path to config.toml. BKMR_DATA_DIR takes
+// precedence over the platform config locations, so a single override
+// relocates everything bkmr touches.
 func ConfigPath() (string, error) {
-	if runtime.GOOS == "linux" {
-		base := os.Getenv("XDG_CONFIG_HOME")
-		if base == "" {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				return "", err
+	if os.Getenv("BKMR_DATA_DIR") == "" {
+		if runtime.GOOS == "linux" {
+			base := os.Getenv("XDG_CONFIG_HOME")
+			if base == "" {
+				home, err := os.UserHomeDir()
+				if err != nil {
+					return "", err
+				}
+				base = filepath.Join(home, ".config")
 			}
-			base = filepath.Join(home, ".config")
-		}
-		return filepath.Join(base, appDir, "config.toml"), nil
-	}
-	if runtime.GOOS == "windows" {
-		if base := os.Getenv("APPDATA"); base != "" {
 			return filepath.Join(base, appDir, "config.toml"), nil
+		}
+		if runtime.GOOS == "windows" {
+			if base := os.Getenv("APPDATA"); base != "" {
+				return filepath.Join(base, appDir, "config.toml"), nil
+			}
 		}
 	}
 	dir, err := DataDir()
