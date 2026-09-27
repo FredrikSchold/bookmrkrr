@@ -11,6 +11,7 @@ import (
 	"html"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -38,29 +39,8 @@ func Title(ctx context.Context, rawURL string) (string, error) {
 		// No cookie jar: nil Jar means no cookies are ever sent or stored, so
 		// a fetch cannot carry a session the user has with the site and cannot
 		// leave one behind for the next fetch to carry.
-		Jar: nil,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= maxRedirects {
-				return fmt.Errorf("stopped after %d redirects", maxRedirects)
-			}
-			// Staying on the original host keeps a redirect from turning one
-			// deliberate request into a request to a third party the user
-			// never named - a tracker, an ad host, an internal address on
-			// their own network. Comparing Host and not Hostname keeps the
-			// port in the comparison; comparing it against via[0] and not the
-			// previous hop stops a chain from walking away one host at a time.
-			//
-			// Consequence, deliberate: an http:// to https:// upgrade on the
-			// same host is fine (the scheme is not part of Host), but an apex
-			// to www. hop - example.com redirecting to www.example.com - is
-			// refused, and that is a common shape. The cost is an empty title
-			// and a note on stderr, never a lost bookmark. See the task 9
-			// report before widening this.
-			if req.URL.Host != via[0].URL.Host {
-				return fmt.Errorf("refusing to follow a redirect off %s to %s", via[0].URL.Host, req.URL.Host)
-			}
-			return nil
-		},
+		Jar:           nil,
+		CheckRedirect: sameSite,
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
@@ -91,6 +71,44 @@ func Title(ctx context.Context, rawURL string) (string, error) {
 		return "", err
 	}
 	return titleFrom(string(body)), nil
+}
+
+// sameSite is the whole redirect policy: bounded, and never off the site the
+// user asked for. Refusing a site change keeps one deliberate request from
+// turning into a request to a third party the user never named - a tracker, an
+// ad host, an internal address on their own network. It compares against via[0]
+// rather than the previous hop so a chain cannot walk away one host at a time.
+//
+// "Site" tolerates exactly one difference: a leading www. on either side, so
+// that the ordinary example.com -> www.example.com hop (and its reverse) is
+// followed. Everything else is still refused, and should stay refused:
+//
+//   - any other subdomain - cdn.example.com, login.example.com - because a page
+//     title should come from the page, and a redirect to a sibling host is the
+//     shape a tracker or an SSO bounce takes;
+//   - a port change, which is why the comparison keeps the port;
+//   - a different registrable domain.
+//
+// Widening this to "same registrable domain" would mean a public-suffix list to
+// tell example.co.uk from co.uk, and therefore another dependency. Not worth it
+// for a page title.
+//
+// The scheme is deliberately not compared: an http:// to https:// upgrade on the
+// same host is an improvement, not a redirection elsewhere.
+func sameSite(req *http.Request, via []*http.Request) error {
+	if len(via) >= maxRedirects {
+		return fmt.Errorf("stopped after %d redirects", maxRedirects)
+	}
+	if canonicalHost(req.URL) != canonicalHost(via[0].URL) {
+		return fmt.Errorf("refusing to follow a redirect off %s to %s", via[0].URL.Host, req.URL.Host)
+	}
+	return nil
+}
+
+// canonicalHost is the identity a redirect has to preserve: the host with one
+// leading www. removed, and the port kept.
+func canonicalHost(u *url.URL) string {
+	return strings.TrimPrefix(u.Hostname(), "www.") + ":" + u.Port()
 }
 
 // titleFrom extracts and cleans the contents of the first <title> element.

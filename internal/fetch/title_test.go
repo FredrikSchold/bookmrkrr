@@ -159,6 +159,47 @@ func TestTitleFollowsASameHostRedirect(t *testing.T) {
 	}
 }
 
+// The two httptest servers above can only ever differ by port, so the policy's
+// host rules are asserted here against the predicate itself. www.example.com and
+// example.com cannot both be stood up locally, and a title fetch that gives up
+// on an apex-to-www hop would look broken on a large share of the web.
+func TestSameSiteAllowsAWwwHopAndNothingElse(t *testing.T) {
+	cases := []struct {
+		name    string
+		from    string
+		to      string
+		wantErr bool
+	}{
+		{"apex to www", "https://example.com/a", "https://www.example.com/a", false},
+		{"www to apex", "https://www.example.com/a", "https://example.com/a", false},
+		{"an http to https upgrade on the same host", "http://example.com/a", "https://example.com/a", false},
+		{"a path change on the same host", "https://example.com/a", "https://example.com/b", false},
+		{"another subdomain", "https://example.com/a", "https://cdn.example.com/a", true},
+		{"a subdomain of www", "https://www.example.com/a", "https://cdn.example.com/a", true},
+		{"a different registrable domain", "https://example.com/a", "https://example.test/a", true},
+		{"a different port on the same host", "http://127.0.0.1:1/a", "http://127.0.0.1:2/a", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			via, err := http.NewRequest(http.MethodGet, tc.from, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req, err := http.NewRequest(http.MethodGet, tc.to, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = sameSite(req, []*http.Request{via})
+			if tc.wantErr && err == nil {
+				t.Errorf("sameSite(%s -> %s) = nil, want a refusal", tc.from, tc.to)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("sameSite(%s -> %s) = %v, want it followed", tc.from, tc.to, err)
+			}
+		})
+	}
+}
+
 func TestTitleRespectsAContextDeadline(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(300 * time.Millisecond)

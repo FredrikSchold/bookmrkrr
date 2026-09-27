@@ -41,12 +41,13 @@ func newVaultForTest(t *testing.T, password string) string {
 	// and the handful in fetch_test.go that want the real one call
 	// useRealFetcher and point it at their own httptest server.
 	//
-	// It returns no title and no error rather than an error: a stub that failed
-	// would make resolveTitle write its warning to errOut on nearly every add
-	// in the suite, which both dirties the output and breaks
+	// Do not "fix" this to return an error. A stub that failed would make
+	// resolveTitle write its warning to errOut on nearly every add in the
+	// suite, which both dirties the output and breaks
 	// TestAddExplainsABusyVaultAndSavesNothing, whose point is that a refused
-	// add says nothing on stderr. An empty title is just as hermetic, and a
-	// test that secretly depended on a fetched title still fails.
+	// add says nothing on stderr. An empty title with a nil error is just as
+	// hermetic - the function makes no call of any kind - and a test that
+	// secretly depended on a fetched title still fails on the empty string.
 	oldFetch := fetchTitle
 	fetchTitle = func(context.Context, string) (string, error) { return "", nil }
 	t.Cleanup(func() { fetchTitle = oldFetch })
