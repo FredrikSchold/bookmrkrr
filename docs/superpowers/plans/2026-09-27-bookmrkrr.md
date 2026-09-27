@@ -6,14 +6,15 @@
 
 **Architecture:** A single Go binary. `internal/crypto` seals one JSON document into an authenticated envelope; `internal/store` loads and atomically rewrites that file; `internal/model` owns the bookmark type and its normalization rules; `cmd/bkmr` is a flat dispatch table of subcommands; `internal/tui` is one reusable fuzzy picker serving both bookmark retrieval and tab capture. All outbound network lives in `internal/fetch` and `internal/capture/browser`, enforced by a test.
 
-**Tech Stack:** Go 1.24+, `golang.org/x/crypto` (argon2id, XChaCha20-Poly1305, term), `bubbletea` + `bubbles/textinput` + `lipgloss`, `sahilm/fuzzy`, `atotto/clipboard`, `zalando/go-keyring`, `BurntSushi/toml`.
+**Tech Stack:** Go 1.26+, `golang.org/x/crypto` (argon2id, XChaCha20-Poly1305, term), `bubbletea` + `bubbles/textinput` + `lipgloss`, `sahilm/fuzzy`, `atotto/clipboard`, `zalando/go-keyring`, `BurntSushi/toml`.
 
 **Spec:** `docs/superpowers/specs/2026-09-27-bookmrkrr-design.md`
 
 ## Global Constraints
 
 - Module path: `github.com/FredrikSchold/bookmrkrr`. Binary: `bkmr`. License: MIT.
-- `go.mod` declares `go 1.24`. Everything must build with `CGO_ENABLED=0`.
+- `go.mod` declares `go 1.26`. Everything must build with `CGO_ENABLED=0`.
+  > **Amended during execution (Task 2):** the plan originally said `go 1.24`. Current `golang.org/x/crypto` requires a higher directive, and pinning the crypto library back to an older release to preserve a version floor is the wrong trade for a tool whose whole point is encryption — `govulncheck` runs in CI and CVE fixes land in the newest release. Users who cannot run Go 1.26 use the release binaries.
 - **Nine direct dependencies, no more**: `bubbletea`, `bubbles`, `lipgloss`, `sahilm/fuzzy`, `atotto/clipboard`, `zalando/go-keyring`, `golang.org/x/crypto`, `golang.org/x/term`, `BurntSushi/toml`. A tenth needs a justification in the PR.
   > **Correction to spec §12:** the spec lists eight and folds `term` into `golang.org/x/crypto`. `golang.org/x/term` is a separate module, and it is what reads a password without echoing it, so the real floor is nine. Nothing else changes.
 - `net/http` may be imported **only** by `internal/fetch` and `internal/capture/browser`. Task 13 enforces this in CI.
@@ -5708,7 +5709,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version: "1.26"
           check-latest: true
       - run: go build ./...
       - run: go vet ./...
@@ -5720,7 +5721,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version: "1.26"
           check-latest: true
       - run: go install honnef.co/go/tools/cmd/staticcheck@latest
       - run: staticcheck ./...
@@ -5735,7 +5736,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version: "1.26"
           check-latest: true
       - name: build every release target
         run: |
