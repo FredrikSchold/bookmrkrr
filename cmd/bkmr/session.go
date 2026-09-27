@@ -27,13 +27,19 @@ func openVault() (*store.Vault, error) {
 		return nil, err
 	}
 	if !store.Exists(dir) {
-		return nil, fmt.Errorf("no vault found in %s - run 'bkmr init' to create one", dir)
+		return nil, errNoVault(dir)
 	}
 	key, err := keyFor(dir)
 	if err != nil {
 		return nil, err
 	}
 	return store.New(dir, key), nil
+}
+
+// errNoVault is the one place the "there is no vault yet" refusal is worded, so
+// the commands that check for one cannot drift apart.
+func errNoVault(dir string) error {
+	return fmt.Errorf("no vault found in %s - run 'bkmr init' to create one", dir)
 }
 
 // keyFor returns the cached key, or derives one from a prompted password. It
@@ -75,10 +81,12 @@ func explainVaultError(err error) error {
 	// outside bkmr - a backup agent, an editor, a virus scanner - is holding
 	// the file open. This is routine on Windows. The default text names a .tmp
 	// file the user never asked about and offers no way forward, so keep the
-	// platform's reason and drop the rest.
+	// platform's reason and drop the rest. %w, not %v: the underlying error is
+	// what a caller would match against - fs.ErrPermission, say - and there is
+	// no reason to break the chain to reword the wrapper.
 	var le *os.LinkError
 	if errors.As(err, &le) {
-		return fmt.Errorf("could not replace %s: %v - something else has the file open; close it and try again", le.New, le.Err)
+		return fmt.Errorf("could not replace %s: %w - something else has the file open; close it and try again", le.New, le.Err)
 	}
 	return err
 }

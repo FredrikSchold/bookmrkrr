@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/FredrikSchold/bookmrkrr/internal/config"
@@ -30,7 +29,7 @@ func runUnlock([]string) error {
 		return err
 	}
 	if !store.Exists(dir) {
-		return fmt.Errorf("no vault found in %s - run 'bkmr init' to create one", dir)
+		return errNoVault(dir)
 	}
 	key, err := deriveFromPrompt(dir)
 	if err != nil {
@@ -52,18 +51,16 @@ func runUnlock([]string) error {
 }
 
 func runLock([]string) error {
+	// A failed delete is a failed lock, and nothing here can soften that.
+	// Asking keyring.Get whether a key survived would be worse than useless:
+	// Get reports ErrNoKey for a keychain that is absent and for one that is
+	// merely locked alike, so a locked macOS Keychain still holding the key
+	// would answer "nothing cached" and we would claim a lock that never
+	// happened - and the key would be live again the moment the keychain
+	// opened. So say only what is known, and keep "Vault locked." for a delete
+	// that actually returned.
 	if err := keyring.Delete(); err != nil {
-		// The keychain refused the delete. lock's promise is that no cached key
-		// is left for bkmr to use, so ask whether one is still readable rather
-		// than dumping a dbus or wincred error and calling it a failure:
-		// keyring.Get reports ErrNoKey for every platform failure too, so a box
-		// with no credential store at all answers "nothing cached" here, which
-		// is the truth. Explain why the delete itself did not run, and leave
-		// "there was nothing to lock" unsaid - it might not be true.
-		if _, getErr := keyring.Get(); !errors.Is(getErr, keyring.ErrNoKey) {
-			return fmt.Errorf("could not drop the cached key from the system keychain: %w", err)
-		}
-		fmt.Fprintf(errOut, "bkmr: the system keychain is unavailable (%v); no cached key was reachable.\n", err)
+		return fmt.Errorf("could not reach the system keychain (%w); if a key is cached there it may still be present, and bkmr will prompt until it can be dropped", err)
 	}
 	fmt.Fprintln(out, "Vault locked.")
 	return nil

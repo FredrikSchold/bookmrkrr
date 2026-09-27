@@ -55,9 +55,12 @@ func runInit([]string) error {
 	// A keychain that will not take the key is not a reason to throw the vault
 	// away - it exists and the password opens it. Report both halves of what
 	// happened, the platform's own error included, so the user knows why every
-	// command from here on asks for a password.
+	// command from here on asks for a password. The halves go to different
+	// streams: what init achieved is output, why caching failed is a
+	// diagnostic, and nothing in this package puts a diagnostic in the pipe.
 	if err := keyring.Put(key); err != nil {
-		fmt.Fprintf(out, "Vault created in %s.\nCould not cache the key (%v); you will be prompted each time.\n", dir, err)
+		fmt.Fprintf(out, "Vault created in %s.\n", dir)
+		fmt.Fprintf(errOut, "bkmr: could not cache the key (%v); you will be prompted each time.\n", err)
 		return nil
 	}
 	fmt.Fprintf(out, "Vault created in %s and unlocked.\nAdd your first bookmark with 'bkmr add <url>'.\n", dir)

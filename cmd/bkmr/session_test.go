@@ -3,7 +3,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 	"testing"
@@ -33,18 +32,16 @@ func newVaultForTest(t *testing.T, password string) string {
 	readPassword = func(string) ([]byte, error) { return []byte(password), nil }
 	t.Cleanup(func() { readPassword = old })
 
-	// Every command reports to out, so a helper the whole suite calls would
-	// otherwise spray "Vault created in ..." over the test binary's stdout.
-	// Park out on io.Discard for the rest of the test; capture() saves and
-	// restores out itself, so a test that asserts on output still works.
-	// errOut is deliberately left alone: an unexpected diagnostic showing up
-	// in test output is information, not noise.
-	oldOut := out
-	out = io.Discard
-	t.Cleanup(func() { out = oldOut })
-
-	if err := runInit(nil); err != nil {
-		t.Fatalf("runInit() error = %v", err)
+	// runInit reports where it put the vault, and a helper the whole suite calls
+	// has no business spraying that over the test binary's stdout. capture
+	// swallows it and restores out the moment runInit returns, so the silence is
+	// scoped to this one call and no later test inherits a dead writer. errOut
+	// is deliberately left alone: an unexpected diagnostic showing up in test
+	// output is information, not noise.
+	var initErr error
+	capture(t, func() { initErr = runInit(nil) })
+	if initErr != nil {
+		t.Fatalf("runInit() error = %v", initErr)
 	}
 	return dir
 }
@@ -157,6 +154,56 @@ func TestUnlockWithTheWrongPasswordDoesNotCacheAKey(t *testing.T) {
 	}
 }
 
+func TestInitRefusesMismatchedPasswordsAndWritesNothing(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BKMR_DATA_DIR", dir)
+	kr.MockInit()
+
+	// The confirmation guard is the only thing standing between a typo and a
+	// vault nobody can ever open, so it needs a prompt that answers differently
+	// the second time rather than the same bytes twice.
+	var calls int
+	old := readPassword
+	readPassword = func(string) ([]byte, error) {
+		calls++
+		if calls == 1 {
+			return []byte("hunter2"), nil
+		}
+		return []byte("hunterZ"), nil
+	}
+	t.Cleanup(func() { readPassword = old })
+
+	stdout, stderr := bothStreams(t, func() {
+		if err := runInit(nil); err == nil {
+			t.Error("runInit() error = nil with mismatched passwords, want an error")
+		}
+	})
+
+	if calls != 2 {
+		t.Errorf("runInit() prompted %d times, want 2: it must ask for a confirmation", calls)
+	}
+	// The error matters, but so does the absence of any residue: a vault sealed
+	// with a typo'd password is unrecoverable, and a cached key from one is a
+	// lie the next command would believe.
+	if store.Exists(dir) {
+		t.Error("runInit() sealed a vault from mismatched passwords")
+	}
+	if entries, err := os.ReadDir(dir); err != nil {
+		t.Fatalf("ReadDir(%s) error = %v", dir, err)
+	} else if len(entries) != 0 {
+		t.Errorf("runInit() left %d files behind in the data directory, want none: %v", len(entries), entries)
+	}
+	if _, err := keyring.Get(); !errors.Is(err, keyring.ErrNoKey) {
+		t.Errorf("keyring.Get() = %v, want ErrNoKey: nothing was derived to cache", err)
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want nothing; init did not create anything to report", stdout)
+	}
+	if stderr != "" {
+		t.Errorf("stderr = %q, want nothing; dispatch prints the returned error", stderr)
+	}
+}
+
 func TestInitSeedsTheCollectionVersion(t *testing.T) {
 	newVaultForTest(t, "hunter2")
 	v, _ := openVault()
@@ -197,7 +244,7 @@ func TestInitWithAnUnusableKeychainStillCreatesTheVault(t *testing.T) {
 	readPassword = func(string) ([]byte, error) { return []byte("hunter2"), nil }
 	t.Cleanup(func() { readPassword = old })
 
-	stdout, _ := bothStreams(t, func() {
+	stdout, stderr := bothStreams(t, func() {
 		if err := runInit(nil); err != nil {
 			t.Errorf("runInit() error = %v, want nil: the vault itself was created", err)
 		}
@@ -206,32 +253,56 @@ func TestInitWithAnUnusableKeychainStillCreatesTheVault(t *testing.T) {
 	if !store.Exists(dir) {
 		t.Fatal("runInit() left no vault behind")
 	}
-	if !strings.Contains(stdout, errNoKeychain.Error()) {
-		t.Errorf("init output = %q, want it to name why caching failed", stdout)
+	if !strings.Contains(stdout, "Vault created") {
+		t.Errorf("init output = %q, want it to report the vault it created", stdout)
 	}
-	if !strings.Contains(stdout, "prompted") {
-		t.Errorf("init output = %q, want it to warn that the password will be prompted for each time", stdout)
+	// The caching failure is a diagnostic, so it belongs on stderr with the rest
+	// of them, not in a pipe somebody may be reading.
+	if strings.Contains(stdout, errNoKeychain.Error()) {
+		t.Errorf("init put the keychain failure on stdout: %q", stdout)
+	}
+	if !strings.Contains(stderr, errNoKeychain.Error()) {
+		t.Errorf("init diagnostics = %q, want them to name why caching failed", stderr)
+	}
+	if !strings.Contains(stderr, "prompted") {
+		t.Errorf("init diagnostics = %q, want a warning that the password will be prompted for each time", stderr)
+	}
+	if !strings.HasPrefix(stderr, "bkmr:") {
+		t.Errorf("init diagnostics = %q, want them prefixed with the binary name", stderr)
 	}
 }
 
-func TestLockWithAnUnusableKeychainStillReportsTheVaultLocked(t *testing.T) {
+func TestLockWithAnUnreachableKeychainDoesNotClaimTheVaultIsLocked(t *testing.T) {
 	kr.MockInitWithError(errNoKeychain)
 	t.Cleanup(kr.MockInit)
 
+	// keyring.Get cannot be consulted to soften this: it answers ErrNoKey for a
+	// keychain that is absent and for one that is merely locked alike, so a
+	// locked keychain still holding the key looks identical to an empty one.
+	// lock must therefore report a failure rather than a lock it cannot prove.
+	if err := runLock(nil); err == nil {
+		t.Fatal("runLock() error = nil with an unreachable keychain, want an error: the key may still be cached")
+	} else if !errors.Is(err, errNoKeychain) {
+		t.Errorf("runLock() error = %v, want it to carry the keychain's own error", err)
+	}
+
 	stdout, stderr := bothStreams(t, func() {
-		if err := runLock(nil); err != nil {
-			t.Errorf("runLock() error = %v, want nil: no cached key is reachable", err)
+		if code := dispatch([]string{"lock"}); code != 1 {
+			t.Errorf("dispatch(lock) = %d, want 1", code)
 		}
 	})
 
-	if !strings.Contains(stdout, "locked") {
-		t.Errorf("lock output = %q, want it to report the vault locked", stdout)
+	if stdout != "" {
+		t.Errorf("stdout = %q, want nothing; a failed lock must not land in the pipe", stdout)
 	}
-	if !strings.Contains(stderr, "keychain") {
-		t.Errorf("lock diagnostics = %q, want an explanation of the keychain failure", stderr)
+	if strings.Contains(strings.ToLower(stdout+stderr), "vault locked") {
+		t.Errorf("lock claimed the vault is locked (%q / %q) when it could not drop the key", stdout, stderr)
 	}
-	if !strings.HasPrefix(stderr, "bkmr:") {
-		t.Errorf("lock diagnostics = %q, want them prefixed with the binary name", stderr)
+	if !strings.Contains(stderr, errNoKeychain.Error()) {
+		t.Errorf("lock diagnostics = %q, want them to name the keychain failure", stderr)
+	}
+	if !strings.Contains(stderr, "may still be present") {
+		t.Errorf("lock diagnostics = %q, want them to say the cached key may have survived", stderr)
 	}
 }
 
@@ -249,18 +320,22 @@ func TestVaultErrorsAreExplainedRatherThanDumped(t *testing.T) {
 	}
 
 	// What a Windows sharing violation on the publishing rename looks like.
+	errInUse := errors.New("The process cannot access the file because it is being used by another process.")
 	link := &os.LinkError{
 		Op:  "rename",
 		Old: `C:\vault\vault.bkmr.tmp`,
 		New: `C:\vault\vault.bkmr`,
-		Err: errors.New("The process cannot access the file because it is being used by another process."),
+		Err: errInUse,
 	}
-	got := explainVaultError(link)
+	got := explainVaultError(fmt.Errorf("save: %w", link))
 	if strings.Contains(got.Error(), ".tmp") {
 		t.Errorf("explainVaultError(*os.LinkError) = %q, want the temp file left out of it", got)
 	}
 	if !strings.Contains(got.Error(), "used by another process") {
 		t.Errorf("explainVaultError(*os.LinkError) = %q, want the platform's own reason kept", got)
+	}
+	if !errors.Is(got, errInUse) {
+		t.Errorf("explainVaultError(*os.LinkError) = %v, want the underlying error still matchable", got)
 	}
 
 	other := errors.New("disk on fire")
