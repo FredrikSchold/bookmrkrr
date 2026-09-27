@@ -78,7 +78,8 @@ func runAdd(args []string) error {
 	if raw == "" {
 		return fmt.Errorf("nothing to add: %s", source(fromClipboard))
 	}
-	if _, err := model.NormalizeURL(raw); err != nil {
+	norm, err := model.NormalizeURL(raw)
+	if err != nil {
 		return fmt.Errorf("%s is not a URL: %q", source(fromClipboard), raw)
 	}
 
@@ -94,8 +95,15 @@ func runAdd(args []string) error {
 	// below then discards, because Add keeps the existing one. Checking first
 	// would mean a Load outside the lock - a TOCTOU that buys one avoided
 	// request - so the waste stays.
+	//
+	// norm, not raw. What gets stored is what the user typed, which was Task 8's
+	// decision, but what gets requested is the normalized URL: it has the
+	// tracking parameters stripped, so utm_source and fbclid are not handed to
+	// the site we had already decided not to keep them for, and it has a scheme,
+	// without which a supported input like "example.com" could never be fetched
+	// at all.
 	if !*noFetch {
-		b.Title = resolveTitle(b.Title, raw)
+		b.Title = resolveTitle(b.Title, norm)
 	}
 
 	// Mutate, not Load-then-Save: it reloads under the write lock, so a
@@ -159,20 +167,27 @@ var fetchTitle = fetch.Title
 const fetchTimeout = 3 * time.Second
 
 // resolveTitle returns the given title, or fetches one when the title is
-// empty and the network is enabled. A fetch failure is reported on errOut and
-// otherwise ignored: losing a bookmark because a site was down is never
-// acceptable.
-func resolveTitle(given, rawURL string) string {
+// empty and the network is enabled. fetchURL must be the normalized URL - see
+// the call site. A fetch failure is reported on errOut and otherwise ignored:
+// losing a bookmark because a site was down is never acceptable.
+func resolveTitle(given, fetchURL string) string {
 	if given != "" {
 		return given
 	}
-	if !config.Load().NetworkEnabled() {
+	cfg := config.Load()
+	// Load never fails, so a broken config.toml would otherwise disable a kill
+	// switch in complete silence. This is the one place the config is read, so
+	// it is the one place that can say so.
+	if cfg.Problem != "" {
+		fmt.Fprintf(errOut, "bkmr: %s\n", cfg.Problem)
+	}
+	if !cfg.NetworkEnabled() {
 		return ""
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
 	defer cancel()
 
-	title, err := fetchTitle(ctx, rawURL)
+	title, err := fetchTitle(ctx, fetchURL)
 	if err != nil {
 		fmt.Fprintf(errOut, "bkmr: could not read the page title (%v); saving without one\n", err)
 		return ""
