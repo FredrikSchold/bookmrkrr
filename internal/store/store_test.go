@@ -135,6 +135,52 @@ func TestSaveReportsBusyWhenTheLockIsHeld(t *testing.T) {
 	}
 }
 
+// A Save that dies on the final rename must leave the vault openable. If it
+// left no vault file at all, the next command would report "no vault found"
+// and bkmr init would create a fresh empty one on top of the user's data.
+func TestFailedSaveLeavesAnOpenableVault(t *testing.T) {
+	v, _ := newTestVault(t)
+	c, _ := v.Load()
+	c.Add(model.Bookmark{URL: "https://original.example"})
+	if err := v.Save(c); err != nil {
+		t.Fatal(err)
+	}
+
+	old := renameFile
+	renameFile = func(string, string) error { return errors.New("injected rename failure") }
+	defer func() { renameFile = old }()
+
+	c.Add(model.Bookmark{URL: "https://doomed.example"})
+	if err := v.Save(c); err == nil {
+		t.Fatal("Save() error = nil, want the injected failure")
+	}
+
+	renameFile = old
+	got, err := v.Load()
+	if err != nil {
+		t.Fatalf("vault is not loadable after a failed Save: %v", err)
+	}
+	if len(got.Bookmarks) != 1 || got.Bookmarks[0].URL != "https://original.example" {
+		t.Errorf("Bookmarks = %+v, want only the original bookmark", got.Bookmarks)
+	}
+	if _, err := os.Stat(v.Path() + ".tmp"); !os.IsNotExist(err) {
+		t.Error("the failed Save() left a .tmp file behind")
+	}
+
+	// The failure must not be terminal: the next Save has to work.
+	got.Add(model.Bookmark{URL: "https://recovered.example"})
+	if err := v.Save(got); err != nil {
+		t.Fatalf("Save() after a failed Save error = %v", err)
+	}
+	again, err := v.Load()
+	if err != nil {
+		t.Fatalf("Load() after recovering error = %v", err)
+	}
+	if len(again.Bookmarks) != 2 {
+		t.Errorf("len(Bookmarks) = %d, want 2 after a successful Save follows a failed one", len(again.Bookmarks))
+	}
+}
+
 // Review Focus 5: two writers must not lose each other's bookmark.
 func TestMutateSerializesConcurrentWriters(t *testing.T) {
 	v, _ := newTestVault(t)

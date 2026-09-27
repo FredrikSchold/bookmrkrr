@@ -20,6 +20,10 @@ const FileName = "vault.bkmr"
 // ErrBusy means another bkmr process holds the write lock.
 var ErrBusy = errors.New("vault is busy - another bkmr is writing to it")
 
+// renameFile is a seam so a test can fail the one rename that publishes a new
+// vault. It is never reassigned outside tests.
+var renameFile = os.Rename
+
 // Vault is an encrypted bookmark collection on disk.
 type Vault struct {
 	dir string
@@ -148,11 +152,25 @@ func (v *Vault) write(c *model.Collection) error {
 		os.Remove(tmp)
 		return err
 	}
-	if err := os.Rename(v.Path(), v.Path()+".bak"); err != nil && !os.IsNotExist(err) {
+	// Copy the current vault to .bak rather than renaming it there. A rename
+	// would unlink vault.bkmr, and if the rename below then failed the vault
+	// would be absent from disk entirely: the next command would report "no
+	// vault found", and bkmr init - which only checks Exists() - would create a
+	// fresh empty vault on top of the user's bookmarks. A crash partway through
+	// this copy leaves a truncated .bak, which is an acceptable trade because
+	// the vault itself is still intact and openable.
+	if err := os.WriteFile(v.Path()+".bak", blob, 0o600); err != nil {
 		os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, v.Path())
+	// The one publishing step. Rename replaces the existing vault atomically on
+	// every supported platform, so a reader sees either the old file or the new
+	// one and never a partial write.
+	if err := renameFile(tmp, v.Path()); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // lock takes an advisory lock via exclusive file creation.
