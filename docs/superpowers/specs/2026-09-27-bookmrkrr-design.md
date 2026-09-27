@@ -157,12 +157,25 @@ passphrase the user may have reused elsewhere.
    cannot clobber one another.
 2. Serialize, encrypt, and write to `vault.bkmr.tmp` in the same directory.
 3. `fsync` the temp file.
-4. Rotate the current vault to `vault.bkmr.bak`.
-5. Rename the temp file over `vault.bkmr`.
+4. **Copy** the current vault to `vault.bkmr.bak`, leaving the vault in place.
+5. Rename the temp file over `vault.bkmr`, replacing it.
 6. Release the lock.
 
-An interruption at any step leaves either the previous vault or the backup
-intact.
+**There is no ordering in which `vault.bkmr` is absent.** Interrupted during
+steps 1–4, the vault is untouched and openable; interrupted during step 5, the
+result is either the old or the new vault, both openable. An interrupted step 4
+can leave a partial `.bak`, which is an acceptable trade because the vault
+itself is intact.
+
+> **Amended during execution (Task 4):** step 4 originally *renamed* the vault
+> to `.bak` before renaming the temp file into place. That left a window with
+> no vault file at all, and Windows makes it reachable — `os.Rename` onto an
+> open path fails with a sharing violation. A user landing in that window is
+> told "no vault found — run `bkmr init`", and `init` then creates a fresh
+> empty vault because `Exists()` is false, stranding their bookmarks in `.bak`
+> with no indication anything survived. That is data loss wearing a friendly
+> error message. Copying rather than rotating removes the window entirely, at
+> the cost of one extra read-and-write of a small file per save.
 
 ### Paths
 
