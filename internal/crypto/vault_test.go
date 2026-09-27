@@ -69,7 +69,12 @@ func TestOpenRejectsDowngradedKDFParams(t *testing.T) {
 
 	// Rewrite the memory cost in the header. It is authenticated as
 	// associated data, so the vault must refuse to open.
-	binary.BigEndian.PutUint32(blob[10:14], 8)
+	//
+	// 4096 is deliberately mid-range: it must stay inside the bounds SaltOf
+	// enforces, so that the Poly1305 tag is the only thing that can reject this
+	// blob. A value on or outside a bound would let SaltOf fail first and this
+	// test would keep passing while no longer exercising the AD binding at all.
+	binary.BigEndian.PutUint32(blob[10:14], 4096)
 
 	if _, err := Open(key, blob); !errors.Is(err, ErrBadVault) {
 		t.Errorf("Open() error = %v, want ErrBadVault", err)
@@ -138,6 +143,42 @@ func TestSaltOfRejectsHostileKDFParams(t *testing.T) {
 	}
 }
 
+// Seal and Open must be inverses over everything Seal accepts. If Seal writes a
+// blob whose header sits outside the bounds SaltOf enforces, that file can never
+// be opened again and the user is told their good vault is corrupt.
+func TestSealRejectsOutOfRangeParams(t *testing.T) {
+	salt, err := NewSalt()
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := DeriveKey([]byte("pw"), salt, fastParams)
+
+	tests := []struct {
+		name string
+		p    Params
+	}{
+		{"time above ceiling", Params{Time: 100, MemoryKiB: 64 * 1024, Threads: 4}},
+		{"zero time", Params{Time: 0, MemoryKiB: 64 * 1024, Threads: 4}},
+		{"threads above ceiling", Params{Time: 3, MemoryKiB: 64 * 1024, Threads: 65}},
+		{"zero threads", Params{Time: 3, MemoryKiB: 64 * 1024, Threads: 0}},
+		{"memory below floor", Params{Time: 3, MemoryKiB: 1, Threads: 4}},
+		{"memory above ceiling", Params{Time: 3, MemoryKiB: 1 << 22, Threads: 4}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Seal(key, []byte("x"), tt.p, salt)
+			if err == nil {
+				t.Fatal("Seal() succeeded with out-of-range params; the blob it wrote could never be opened again")
+			}
+			// The write path takes programmer input, not attacker input, so it
+			// should say what is wrong rather than hide behind ErrBadVault.
+			if errors.Is(err, ErrBadVault) {
+				t.Errorf("Seal() error = %v, want a descriptive error rather than ErrBadVault", err)
+			}
+		})
+	}
+}
+
 const goldenPassword = "correct horse battery staple"
 const goldenPlaintext = `{"version":1,"bookmarks":[{"id":"aaaaaaaa","url":"https://example.com/","added":"2026-09-27T00:00:00Z"}]}`
 
@@ -147,8 +188,17 @@ const goldenPlaintext = `{"version":1,"bookmarks":[{"id":"aaaaaaaa","url":"https
 func TestGoldenVaultStillOpens(t *testing.T) {
 	path := filepath.Join("testdata", "golden_v1.bkmr")
 
+	// A regenerating run must never be able to report PASS. Re-sealing the
+	// fixture and then asserting against it proves nothing - it would only show
+	// that Seal and Open agree with each other right now, which is the one thing
+	// this test is not for. Failing unconditionally means a stray export or a CI
+	// job that inherits BKMR_WRITE_GOLDEN is loud instead of silently destroying
+	// the artifact that pins the format.
 	if os.Getenv("BKMR_WRITE_GOLDEN") == "1" {
-		salt, _ := NewSalt()
+		salt, err := NewSalt()
+		if err != nil {
+			t.Fatal(err)
+		}
 		blob, err := Seal(DeriveKey([]byte(goldenPassword), salt, Default), []byte(goldenPlaintext), Default, salt)
 		if err != nil {
 			t.Fatal(err)
@@ -159,7 +209,7 @@ func TestGoldenVaultStillOpens(t *testing.T) {
 		if err := os.WriteFile(path, blob, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		t.Log("golden fixture written")
+		t.Fatal("golden fixture regenerated; unset BKMR_WRITE_GOLDEN and re-run so this test actually verifies it")
 	}
 
 	blob, err := os.ReadFile(path)

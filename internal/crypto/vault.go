@@ -76,6 +76,13 @@ func Seal(key, plaintext []byte, p Params, salt []byte) ([]byte, error) {
 	if len(salt) != SaltLen {
 		return nil, fmt.Errorf("salt must be %d bytes, got %d", SaltLen, len(salt))
 	}
+	// Descriptive rather than ErrBadVault: these are a caller's own parameters,
+	// not bytes from a file, so there is no oracle to protect and every reason to
+	// say what is out of bounds.
+	if !p.inRange() {
+		return nil, fmt.Errorf("argon2 parameters out of range: time %d must be %d-%d, memory %d KiB must be %d-%d, threads %d must be %d-%d",
+			p.Time, minTime, maxTime, p.MemoryKiB, minMemoryKiB, maxMemoryKiB, p.Threads, minThreads, maxThreads)
+	}
 	aead, err := chacha20poly1305.NewX(key)
 	if err != nil {
 		return nil, err
@@ -97,6 +104,17 @@ const (
 	minMemoryKiB, maxMemoryKiB = 8, 1024 * 1024 // 1 GiB ceiling
 )
 
+// inRange reports whether p is acceptable. Seal and Open share this one
+// predicate on purpose: a blob Seal is willing to write must be a blob Open is
+// willing to read. If the write path were the more permissive of the two, Seal
+// would hand back a well-formed file that Open rejects forever, and the user
+// would be told their own vault is corrupt.
+func (p Params) inRange() bool {
+	return p.Time >= minTime && p.Time <= maxTime &&
+		p.Threads >= minThreads && p.Threads <= maxThreads &&
+		p.MemoryKiB >= minMemoryKiB && p.MemoryKiB <= maxMemoryKiB
+}
+
 // SaltOf reads the salt and KDF parameters from a vault blob so a caller can
 // derive the key from a password without first decrypting anything.
 //
@@ -117,12 +135,14 @@ func SaltOf(blob []byte) ([]byte, Params, error) {
 		MemoryKiB: binary.BigEndian.Uint32(blob[10:14]),
 		Threads:   blob[14],
 	}
-	if p.Time < minTime || p.Time > maxTime ||
-		p.Threads < minThreads || p.Threads > maxThreads ||
-		p.MemoryKiB < minMemoryKiB || p.MemoryKiB > maxMemoryKiB {
+	if !p.inRange() {
 		return nil, Params{}, ErrBadVault
 	}
-	return blob[15:31], p, nil
+	// A copy, not blob[15:31]. A caller that hygienically zeroes the salt after
+	// deriving the key would otherwise scribble over the header of the very blob
+	// it is about to hand to Open, which would then report ErrBadVault on a
+	// perfectly good file.
+	return append([]byte(nil), blob[15:31]...), p, nil
 }
 
 // Open authenticates and decrypts a vault blob.
