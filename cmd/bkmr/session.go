@@ -1,0 +1,84 @@
+package main
+
+import (
+	"errors"
+	"fmt"
+	"os"
+
+	"github.com/FredrikSchold/bookmrkrr/internal/config"
+	"github.com/FredrikSchold/bookmrkrr/internal/crypto"
+	"github.com/FredrikSchold/bookmrkrr/internal/keyring"
+	"github.com/FredrikSchold/bookmrkrr/internal/store"
+)
+
+// readPassword is a seam so tests can supply a password without a terminal.
+//
+// keyring.PromptPassword writes its prompt straight to standard error rather
+// than through errOut, because internal/keyring knows nothing about this
+// package's streams. That is tolerable only because it is the one prompt path:
+// a test that replaces this variable never reaches it. Do not add a second one.
+var readPassword = keyring.PromptPassword
+
+// openVault resolves the data directory and returns a vault handle whose key
+// comes from the keychain, or from a password prompt when nothing is cached.
+func openVault() (*store.Vault, error) {
+	dir, err := config.DataDir()
+	if err != nil {
+		return nil, err
+	}
+	if !store.Exists(dir) {
+		return nil, fmt.Errorf("no vault found in %s - run 'bkmr init' to create one", dir)
+	}
+	key, err := keyFor(dir)
+	if err != nil {
+		return nil, err
+	}
+	return store.New(dir, key), nil
+}
+
+// keyFor returns the cached key, or derives one from a prompted password. It
+// does not cache what it derives; only 'bkmr unlock' does that.
+func keyFor(dir string) ([]byte, error) {
+	if key, err := keyring.Get(); err == nil {
+		return key, nil
+	}
+	return deriveFromPrompt(dir)
+}
+
+func deriveFromPrompt(dir string) ([]byte, error) {
+	blob, err := os.ReadFile(store.New(dir, nil).Path())
+	if err != nil {
+		return nil, err
+	}
+	salt, params, err := crypto.SaltOf(blob)
+	if err != nil {
+		return nil, err
+	}
+	pw, err := readPassword("Vault password: ")
+	if err != nil {
+		return nil, err
+	}
+	return crypto.DeriveKey(pw, salt, params), nil
+}
+
+// explainVaultError rewrites the vault errors whose own text would leave a
+// person stuck. Presenting them is the CLI's job, not internal/store's, so
+// every command that reads or writes the vault routes its error through here
+// and the advice lives in one place instead of at each call site. Anything it
+// does not recognise is passed through untouched, nil included.
+func explainVaultError(err error) error {
+	if errors.Is(err, store.ErrBusy) {
+		return fmt.Errorf("%w - wait for it to finish and try again", store.ErrBusy)
+	}
+	// A sharing violation on the rename that publishes a new vault arrives as
+	// *os.LinkError, not ErrBusy: bkmr's own lock file was free, so something
+	// outside bkmr - a backup agent, an editor, a virus scanner - is holding
+	// the file open. This is routine on Windows. The default text names a .tmp
+	// file the user never asked about and offers no way forward, so keep the
+	// platform's reason and drop the rest.
+	var le *os.LinkError
+	if errors.As(err, &le) {
+		return fmt.Errorf("could not replace %s: %v - something else has the file open; close it and try again", le.New, le.Err)
+	}
+	return err
+}
