@@ -58,7 +58,24 @@ func NormalizeURL(raw string) (string, error) {
 		return "", fmt.Errorf("not a URL: %q", raw)
 	}
 	if !strings.Contains(raw, "://") {
-		if !strings.Contains(raw, ".") {
+		// A schemeless input is accepted when its host part carries either a
+		// dot or a numeric port, so that a developer can paste "localhost:3000"
+		// straight from the shell. Requiring the text after the colon to be all
+		// digits is what stops scheme-like strings such as "mailto:a@b.com"
+		// from being mangled into an https host ("mailto:a" would otherwise
+		// parse as userinfo on host "b.com").
+		host := raw
+		if i := strings.Index(host, "/"); i >= 0 {
+			host = host[:i]
+		}
+		hasPort := false
+		if i := strings.LastIndex(host, ":"); i >= 0 {
+			if !allDigits(host[i+1:]) {
+				return "", fmt.Errorf("not a URL: %q", raw)
+			}
+			host, hasPort = host[:i], true
+		}
+		if !hasPort && !strings.Contains(host, ".") {
 			return "", fmt.Errorf("not a URL: %q", raw)
 		}
 		raw = "https://" + raw
@@ -88,6 +105,19 @@ func NormalizeURL(raw string) (string, error) {
 		u.Path = ""
 	}
 	return u.String(), nil
+}
+
+// allDigits reports whether s is non-empty and made up only of ASCII digits.
+func allDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // NormalizeTags lowercases, hyphenates internal whitespace, removes blanks

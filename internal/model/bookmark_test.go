@@ -19,6 +19,10 @@ func TestNormalizeURL(t *testing.T) {
 		{"prefixes https on a bare host", "example.com", "https://example.com"},
 		{"prefixes https on a bare host with a path", "example.com/docs", "https://example.com/docs"},
 		{"trims surrounding whitespace", "  https://example.com  ", "https://example.com"},
+		// A shell-dwelling developer pasting a local dev server.
+		{"accepts a bare host with a port", "localhost:8080", "https://localhost:8080"},
+		{"accepts an IP with a port", "127.0.0.1:3000", "https://127.0.0.1:3000"},
+		{"accepts a dotted host with a port", "example.com:8443", "https://example.com:8443"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -34,7 +38,11 @@ func TestNormalizeURL(t *testing.T) {
 }
 
 func TestNormalizeURLRejectsNonURLs(t *testing.T) {
-	for _, in := range []string{"", "   ", "hello world", "ftp://example.com", "file:///etc/passwd", "not a url at all"} {
+	for _, in := range []string{
+		"", "   ", "hello world", "ftp://example.com", "file:///etc/passwd", "not a url at all",
+		// A scheme-like string must not be mangled into an https host.
+		"mailto:a@b.com", "localhost:", "localhost:abc",
+	} {
 		if got, err := NormalizeURL(in); err == nil {
 			t.Errorf("NormalizeURL(%q) = %q, want an error", in, got)
 		}
