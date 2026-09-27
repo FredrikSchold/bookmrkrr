@@ -46,6 +46,19 @@ func newVaultForTest(t *testing.T, password string) string {
 	return dir
 }
 
+// lockForTest drops the cached key as setup for a test about something else,
+// without runLock's report reaching the suite's output. Where that report is
+// itself the subject, capture it and assert on it instead - see
+// TestLockDropsTheCachedKeyAndUnlockRestoresIt.
+func lockForTest(t *testing.T) {
+	t.Helper()
+	capture(t, func() {
+		if err := runLock(nil); err != nil {
+			t.Fatalf("runLock() error = %v", err)
+		}
+	})
+}
+
 func TestInitCreatesAVaultAndCachesTheKey(t *testing.T) {
 	newVaultForTest(t, "hunter2")
 
@@ -89,15 +102,28 @@ func TestOpenVaultWithoutAVaultTellsTheUserToInit(t *testing.T) {
 func TestLockDropsTheCachedKeyAndUnlockRestoresIt(t *testing.T) {
 	newVaultForTest(t, "hunter2")
 
-	if err := runLock(nil); err != nil {
-		t.Fatalf("runLock() error = %v", err)
+	// These two calls are the only place in the suite where lock's and unlock's
+	// own reports are the subject, so they are asserted rather than discarded:
+	// a command whose entire visible effect is one line owes the user that line.
+	locked := capture(t, func() {
+		if err := runLock(nil); err != nil {
+			t.Fatalf("runLock() error = %v", err)
+		}
+	})
+	if want := "Vault locked.\n"; locked != want {
+		t.Errorf("runLock() printed %q, want %q", locked, want)
 	}
 	if _, err := keyring.Get(); !errors.Is(err, keyring.ErrNoKey) {
 		t.Errorf("keyring.Get() after lock error = %v, want ErrNoKey", err)
 	}
 
-	if err := runUnlock(nil); err != nil {
-		t.Fatalf("runUnlock() error = %v", err)
+	unlocked := capture(t, func() {
+		if err := runUnlock(nil); err != nil {
+			t.Fatalf("runUnlock() error = %v", err)
+		}
+	})
+	if want := "Vault unlocked.\n"; unlocked != want {
+		t.Errorf("runUnlock() printed %q, want %q", unlocked, want)
 	}
 	if _, err := keyring.Get(); err != nil {
 		t.Errorf("keyring.Get() after unlock error = %v, want the key cached", err)
@@ -106,9 +132,7 @@ func TestLockDropsTheCachedKeyAndUnlockRestoresIt(t *testing.T) {
 
 func TestOpenVaultFallsBackToAPromptWhenNoKeyIsCached(t *testing.T) {
 	newVaultForTest(t, "hunter2")
-	if err := runLock(nil); err != nil {
-		t.Fatal(err)
-	}
+	lockForTest(t)
 
 	v, err := openVault()
 	if err != nil {
@@ -125,9 +149,7 @@ func TestOpenVaultFallsBackToAPromptWhenNoKeyIsCached(t *testing.T) {
 
 func TestOpenVaultWithTheWrongPasswordFailsToLoad(t *testing.T) {
 	newVaultForTest(t, "hunter2")
-	if err := runLock(nil); err != nil {
-		t.Fatal(err)
-	}
+	lockForTest(t)
 	readPassword = func(string) ([]byte, error) { return []byte("wrong"), nil }
 
 	v, err := openVault()
@@ -141,9 +163,7 @@ func TestOpenVaultWithTheWrongPasswordFailsToLoad(t *testing.T) {
 
 func TestUnlockWithTheWrongPasswordDoesNotCacheAKey(t *testing.T) {
 	newVaultForTest(t, "hunter2")
-	if err := runLock(nil); err != nil {
-		t.Fatal(err)
-	}
+	lockForTest(t)
 	readPassword = func(string) ([]byte, error) { return []byte("wrong"), nil }
 
 	if err := runUnlock(nil); err == nil {
