@@ -1,13 +1,17 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/atotto/clipboard"
 
+	"github.com/FredrikSchold/bookmrkrr/internal/config"
+	"github.com/FredrikSchold/bookmrkrr/internal/fetch"
 	"github.com/FredrikSchold/bookmrkrr/internal/model"
 )
 
@@ -84,6 +88,12 @@ func runAdd(args []string) error {
 	}
 
 	b := model.Bookmark{URL: raw, Title: *title, Notes: *note, Tags: tags}
+	// Fetching happens here, before Mutate takes the write lock, so a slow or
+	// hanging site cannot keep another bkmr out of the vault. The accepted cost:
+	// re-adding a URL the vault already holds fetches a title that the merge
+	// below then discards, because Add keeps the existing one. Checking first
+	// would mean a Load outside the lock - a TOCTOU that buys one avoided
+	// request - so the waste stays.
 	if !*noFetch {
 		b.Title = resolveTitle(b.Title, raw)
 	}
@@ -132,6 +142,40 @@ func label(b model.Bookmark) string {
 	return b.URL
 }
 
-// resolveTitle is replaced with a real implementation in Task 9. Until then a
-// supplied title is kept and nothing is fetched.
-func resolveTitle(given, _ string) string { return given }
+// fetchTitle is a seam so no test in this package can reach the network by
+// accident.
+//
+// cmd/bkmr must not import net/http - internal/fetch is the tool's whole
+// network surface, and a CI check enforces that - so this is a function
+// variable rather than an injected client. It is called from exactly one place,
+// below; the test suite replaces it with a fetcher that cannot reach anything,
+// and the few tests that want the real one point it at their own httptest
+// server. Without this, the add tests written before fetching existed would
+// start making live requests to example.com from CI.
+var fetchTitle = fetch.Title
+
+// fetchTimeout bounds one title fetch. Short on purpose: a title is a
+// convenience, and nobody typing 'bkmr add' wants to wait on a dead host.
+const fetchTimeout = 3 * time.Second
+
+// resolveTitle returns the given title, or fetches one when the title is
+// empty and the network is enabled. A fetch failure is reported on errOut and
+// otherwise ignored: losing a bookmark because a site was down is never
+// acceptable.
+func resolveTitle(given, rawURL string) string {
+	if given != "" {
+		return given
+	}
+	if !config.Load().NetworkEnabled() {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
+	defer cancel()
+
+	title, err := fetchTitle(ctx, rawURL)
+	if err != nil {
+		fmt.Fprintf(errOut, "bkmr: could not read the page title (%v); saving without one\n", err)
+		return ""
+	}
+	return title
+}

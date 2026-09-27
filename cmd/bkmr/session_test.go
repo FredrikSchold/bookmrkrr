@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -31,6 +32,24 @@ func newVaultForTest(t *testing.T, password string) string {
 	old := readPassword
 	readPassword = func(string) ([]byte, error) { return []byte(password), nil }
 	t.Cleanup(func() { readPassword = old })
+
+	// No test in this package may reach a host it did not start itself, and the
+	// add tests pass URLs like https://example.com/a without --no-fetch. With
+	// the real fetcher wired in they would make live outbound requests from CI
+	// on three platforms; a privacy tool whose own suite phones out is exactly
+	// the wrong look. So every test gets a fetcher that cannot reach anything,
+	// and the handful in fetch_test.go that want the real one call
+	// useRealFetcher and point it at their own httptest server.
+	//
+	// It returns no title and no error rather than an error: a stub that failed
+	// would make resolveTitle write its warning to errOut on nearly every add
+	// in the suite, which both dirties the output and breaks
+	// TestAddExplainsABusyVaultAndSavesNothing, whose point is that a refused
+	// add says nothing on stderr. An empty title is just as hermetic, and a
+	// test that secretly depended on a fetched title still fails.
+	oldFetch := fetchTitle
+	fetchTitle = func(context.Context, string) (string, error) { return "", nil }
+	t.Cleanup(func() { fetchTitle = oldFetch })
 
 	// runInit reports where it put the vault, and a helper the whole suite calls
 	// has no business spraying that over the test binary's stdout. capture
