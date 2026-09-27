@@ -20,7 +20,11 @@ func runHelp(args []string) error {
 	if len(args) > 0 {
 		c, ok := find(args[0])
 		if !ok {
-			return fmt.Errorf("unknown command %q", args[0])
+			// A name nobody registered is a usage error, so it exits 2 like any
+			// other unknown command rather than 1. Per the errUsage contract,
+			// the explanation is printed here and errUsage returned bare.
+			fmt.Fprintf(errOut, "bkmr: unknown command %q\n", args[0])
+			return errUsage
 		}
 		fmt.Fprintf(out, "%s\n\nusage: %s\n", c.Summary, c.Usage)
 		return nil

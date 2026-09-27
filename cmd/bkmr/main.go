@@ -68,6 +68,16 @@ func dispatch(args []string) int {
 		fmt.Fprintf(errOut, "bkmr: unknown command %q\nRun 'bkmr help' for the list of commands.\n", name)
 		return 2
 	}
+
+	// A lone --help or -h after a command name asks for that command's usage,
+	// handled here so no command has to implement it. name is registered, so
+	// runHelp cannot fail. A longer argument list is a real invocation and is
+	// passed through untouched.
+	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
+		_ = runHelp([]string{name})
+		return 0
+	}
+
 	if err := c.Run(args); err != nil {
 		if errors.Is(err, errUsage) {
 			fmt.Fprintf(errOut, "usage: %s\n", c.Usage)
@@ -80,6 +90,12 @@ func dispatch(args []string) int {
 }
 
 // errUsage makes a command print its usage line and exit 2.
+//
+// Wrapping it is pointless: dispatch prints only the usage line, so any
+// wrapped text is discarded. A command that wants to explain why the usage was
+// wrong prints its own line to errOut and then returns errUsage bare. This is
+// deliberate — errUsage.Error() is the single word "usage", so a wrapped error
+// would render as "add: url is required: usage", worse than either half alone.
 var errUsage = errors.New("usage")
 
 func main() { os.Exit(dispatch(os.Args[1:])) }

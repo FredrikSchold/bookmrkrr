@@ -7,6 +7,8 @@ import (
 	"testing"
 )
 
+// capture returns what fn wrote to stdout. It swaps a package-level global,
+// so no test in this package may call t.Parallel().
 func capture(t *testing.T, fn func()) string {
 	t.Helper()
 	var buf bytes.Buffer
@@ -86,6 +88,29 @@ func TestHelpForOneCommandPrintsItsUsage(t *testing.T) {
 	}
 	if !strings.Contains(got, h.Usage) {
 		t.Errorf("help help = %q, want it to contain the usage line %q", got, h.Usage)
+	}
+}
+
+func TestHelpForAnUnknownCommandIsAUsageError(t *testing.T) {
+	h, ok := find("help")
+	if !ok {
+		t.Fatal("the help command is not registered")
+	}
+
+	stdout, stderr := bothStreams(t, func() {
+		if code := dispatch([]string{"help", "nosuchcommand"}); code != 2 {
+			t.Errorf("dispatch(help nosuchcommand) = %d, want 2", code)
+		}
+	})
+
+	if stdout != "" {
+		t.Errorf("stdout = %q, want nothing; a usage error must not land in the pipe", stdout)
+	}
+	if !strings.Contains(stderr, "nosuchcommand") {
+		t.Errorf("stderr = %q, want it to name the unknown command", stderr)
+	}
+	if !strings.Contains(stderr, "usage: "+h.Usage) {
+		t.Errorf("stderr = %q, want it to contain the usage line %q", stderr, "usage: "+h.Usage)
 	}
 }
 
