@@ -17,12 +17,14 @@ type Config struct {
 	// entirely, which leaves the binary making no outbound connections.
 	Network networkMode `toml:"network"`
 
-	// Problem is set when Load could not use a config file that exists, and is
-	// empty otherwise. Load cannot return an error, but a kill switch that
-	// stopped working in silence is its own kind of failure: whoever asks for
-	// the config is expected to put this in front of the user. A missing file
-	// is not a problem - that is the ordinary case, and warning about it on
-	// every add would be noise.
+	// Problem is set when Load could not fully use a config file that exists -
+	// it was unreadable, it was not valid TOML, or it declared a key bkmr does
+	// not recognize - and is empty otherwise. Load cannot return an error, but a
+	// kill switch that stopped working in silence is its own kind of failure:
+	// whoever asks for the config is expected to put this in front of the user,
+	// whether or not they were going to use the network. A missing file is not a
+	// problem - that is the ordinary case, and warning about it on every add
+	// would be noise.
 	Problem string `toml:"-"`
 }
 
@@ -75,13 +77,46 @@ func Load() Config {
 		return withProblem(fmt.Sprintf("could not read %s (%v); using defaults", path, err))
 	}
 	cfg := Default
-	if err := toml.Unmarshal(data, &cfg); err != nil {
+	// Decode rather than Unmarshal, for the metadata: a misspelled key is valid
+	// TOML, so netwrok = "off" would otherwise parse cleanly, leave Network at
+	// its default and hand the user a kill switch that does nothing, silently.
+	// Anything the file declares that nothing here consumed is reported.
+	md, err := toml.Decode(string(data), &cfg)
+	if err != nil {
 		return withProblem(fmt.Sprintf("%s is not valid config (%v); using defaults, so the network is on", path, err))
 	}
 	if cfg.Network == "" {
 		cfg.Network = Default.Network
 	}
+	// A reported problem, not an error: whatever else the file said still
+	// applies, so a stray key does not cost someone the settings they got right.
+	if undecoded := md.Undecoded(); len(undecoded) > 0 {
+		cfg.Problem = fmt.Sprintf("config %s has %s %s that bkmr does not recognize, so %s no effect - check the spelling",
+			path, keyWord(len(undecoded)), quoteKeys(undecoded), hasWord(len(undecoded)))
+	}
 	return cfg
+}
+
+func quoteKeys(keys []toml.Key) string {
+	quoted := make([]string, 0, len(keys))
+	for _, k := range keys {
+		quoted = append(quoted, fmt.Sprintf("%q", k.String()))
+	}
+	return strings.Join(quoted, ", ")
+}
+
+func keyWord(n int) string {
+	if n == 1 {
+		return "a key"
+	}
+	return "keys"
+}
+
+func hasWord(n int) string {
+	if n == 1 {
+		return "it has"
+	}
+	return "they have"
 }
 
 func withProblem(msg string) Config {

@@ -83,6 +83,16 @@ func runAdd(args []string) error {
 		return fmt.Errorf("%s is not a URL: %q", source(fromClipboard), raw)
 	}
 
+	// The config is read once, here, and any problem with it is reported whether
+	// or not this add was going to fetch anything. Load never fails, so a broken
+	// or misspelled config.toml would otherwise take someone's kill switch away
+	// in silence - and a config problem is a fact about their configuration, not
+	// about this one add, so --no-fetch and --title must not suppress it.
+	cfg := config.Load()
+	if cfg.Problem != "" {
+		fmt.Fprintf(errOut, "bkmr: %s\n", cfg.Problem)
+	}
+
 	v, err := openVault()
 	if err != nil {
 		return err
@@ -103,7 +113,7 @@ func runAdd(args []string) error {
 	// without which a supported input like "example.com" could never be fetched
 	// at all.
 	if !*noFetch {
-		b.Title = resolveTitle(b.Title, norm)
+		b.Title = resolveTitle(b.Title, norm, cfg.NetworkEnabled())
 	}
 
 	// Mutate, not Load-then-Save: it reloads under the write lock, so a
@@ -166,22 +176,19 @@ var fetchTitle = fetch.Title
 // convenience, and nobody typing 'bkmr add' wants to wait on a dead host.
 const fetchTimeout = 3 * time.Second
 
-// resolveTitle returns the given title, or fetches one when the title is
-// empty and the network is enabled. fetchURL must be the normalized URL - see
-// the call site. A fetch failure is reported on errOut and otherwise ignored:
-// losing a bookmark because a site was down is never acceptable.
-func resolveTitle(given, fetchURL string) string {
+// resolveTitle returns the given title, or fetches one when the title is empty
+// and networkEnabled says the user has not turned fetching off. fetchURL must be
+// the normalized URL - see the call site. A fetch failure is reported on errOut
+// and otherwise ignored: losing a bookmark because a site was down is never
+// acceptable.
+//
+// The kill switch is passed in rather than read here, because whether to report
+// a broken config is not a decision this function should be able to skip.
+func resolveTitle(given, fetchURL string, networkEnabled bool) string {
 	if given != "" {
 		return given
 	}
-	cfg := config.Load()
-	// Load never fails, so a broken config.toml would otherwise disable a kill
-	// switch in complete silence. This is the one place the config is read, so
-	// it is the one place that can say so.
-	if cfg.Problem != "" {
-		fmt.Fprintf(errOut, "bkmr: %s\n", cfg.Problem)
-	}
-	if !cfg.NetworkEnabled() {
+	if !networkEnabled {
 		return ""
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)

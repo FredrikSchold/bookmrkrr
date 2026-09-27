@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -120,6 +121,44 @@ func TestLoadReadsAnUppercaseOffFromTheFile(t *testing.T) {
 
 	if Load().NetworkEnabled() {
 		t.Error("NetworkEnabled() = true, want false for network = \"OFF\"")
+	}
+}
+
+// A misspelled key is valid TOML, so it parses cleanly and leaves Network at its
+// default. Without the metadata check that is a kill switch that does nothing,
+// with no feedback at all - the same defect as a malformed file, by a route that
+// looks like success.
+func TestLoadReportsAnUnrecognizedKey(t *testing.T) {
+	writeConfig(t, "netwrok = \"off\"\n")
+
+	cfg := Load()
+	if !cfg.NetworkEnabled() {
+		t.Error("NetworkEnabled() = false; a misspelled key cannot be honored, so the default must stand")
+	}
+	if !strings.Contains(cfg.Problem, "netwrok") {
+		t.Errorf("Problem = %q, want it to name the unrecognized key", cfg.Problem)
+	}
+}
+
+// An unrecognized key is a reported problem, not an error, so everything the
+// file got right still applies.
+func TestLoadKeepsValidSettingsAlongsideAnUnrecognizedKey(t *testing.T) {
+	writeConfig(t, "network = \"off\"\nnetwrok = \"on\"\n")
+
+	cfg := Load()
+	if cfg.NetworkEnabled() {
+		t.Error("NetworkEnabled() = true, want false: network = \"off\" is still a valid setting")
+	}
+	if !strings.Contains(cfg.Problem, "netwrok") {
+		t.Errorf("Problem = %q, want it to name the unrecognized key", cfg.Problem)
+	}
+}
+
+func TestLoadReportsNoProblemForAConfigItFullyUnderstands(t *testing.T) {
+	writeConfig(t, "network = \"off\"\n")
+
+	if p := Load().Problem; p != "" {
+		t.Errorf("Problem = %q, want none for a config with nothing wrong with it", p)
 	}
 }
 

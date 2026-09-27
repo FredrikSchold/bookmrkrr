@@ -269,6 +269,58 @@ func TestAddReportsABrokenConfigOnErrOut(t *testing.T) {
 	}
 }
 
+// A misspelled key parses as valid TOML, so nothing else would notice that the
+// user's kill switch is not being read.
+func TestAddReportsAnUnrecognizedConfigKey(t *testing.T) {
+	dir := newVaultForTest(t, "pw")
+	writeConfigForTest(t, dir, "netwrok = \"off\"\n")
+
+	stderr := captureErr(t, func() {
+		capture(t, func() {
+			if err := runAdd([]string{"https://example.com/a"}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	})
+
+	if !strings.Contains(stderr, "netwrok") {
+		t.Errorf("stderr = %q, want it to name the unrecognized key", stderr)
+	}
+	if got := bookmarksInVault(t); len(got) != 1 {
+		t.Errorf("len(Bookmarks) = %d, want 1 - a stray config key is not a reason to refuse to work", len(got))
+	}
+}
+
+// A config problem is a fact about the user's configuration, not about this one
+// add, so the flags that mean nothing would have been fetched must not silence
+// it.
+func TestAddReportsABrokenConfigEvenWhenItWouldNotFetch(t *testing.T) {
+	for _, args := range [][]string{
+		{"--no-fetch", "https://example.com/a"},
+		{"--title", "Mine", "https://example.com/a"},
+	} {
+		t.Run(strings.Join(args[:len(args)-1], " "), func(t *testing.T) {
+			dir := newVaultForTest(t, "pw")
+			writeConfigForTest(t, dir, "network = = broken [")
+
+			stderr := captureErr(t, func() {
+				capture(t, func() {
+					if err := runAdd(args); err != nil {
+						t.Fatal(err)
+					}
+				})
+			})
+
+			if !strings.Contains(stderr, "config") {
+				t.Errorf("stderr = %q, want the config problem reported even though nothing was fetched", stderr)
+			}
+			if got := bookmarksInVault(t); len(got) != 1 {
+				t.Errorf("len(Bookmarks) = %d, want 1", len(got))
+			}
+		})
+	}
+}
+
 // writeConfigForTest writes config.toml where BKMR_DATA_DIR puts it, which is
 // the same directory newVaultForTest returns.
 func writeConfigForTest(t *testing.T, dir, body string) {

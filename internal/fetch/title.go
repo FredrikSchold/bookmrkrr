@@ -44,7 +44,10 @@ const (
 //
 // Pass the normalized URL. cmd/bkmr stores what the user typed but fetches
 // model.NormalizeURL's output, so the tracking parameters the tool strips
-// before storage are not handed to the site either.
+// before storage are not handed to the site either. That output is re-encoded
+// on the way through - the remaining query parameters come back sorted, and a
+// schemeless input gains https - so the URL requested here can differ from the
+// URL stored in more than just the parameters that were dropped.
 func Title(ctx context.Context, rawURL string) (string, error) {
 	client := &http.Client{
 		// No cookie jar: nil Jar means no cookies are ever sent or stored, so
