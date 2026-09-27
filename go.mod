@@ -3,6 +3,7 @@ module github.com/FredrikSchold/bookmrkrr
 go 1.26.0
 
 require (
+	github.com/atotto/clipboard v0.1.4
 	github.com/zalando/go-keyring v0.2.8
 	golang.org/x/crypto v0.57.0
 	golang.org/x/term v0.46.0

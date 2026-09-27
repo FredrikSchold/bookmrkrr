@@ -1,0 +1,92 @@
+package main
+
+import (
+	"flag"
+	"fmt"
+	"io"
+	"sort"
+	"strings"
+
+	"github.com/FredrikSchold/bookmrkrr/internal/model"
+)
+
+func init() {
+	register(command{
+		Name:    "ls",
+		Summary: "print bookmarks to stdout, newest first",
+		Usage:   "bkmr ls [--tag name]",
+		Run:     runLs,
+	})
+}
+
+// runLs writes bookmark rows and nothing else to out. Someone will pipe this
+// into grep, so no progress, no warnings and no diagnostics may join them - the
+// "no bookmarks" notice is the one non-row line, and it is program output
+// rather than a diagnostic.
+func runLs(args []string) error {
+	fs := flag.NewFlagSet("ls", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	tag := fs.String("tag", "", "only bookmarks carrying this tag")
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintf(errOut, "bkmr: %v\n", err)
+		return errUsage
+	}
+
+	v, err := openVault()
+	if err != nil {
+		return err
+	}
+	c, err := v.Load()
+	if err != nil {
+		return explainVaultError(err)
+	}
+
+	rows := filterByTag(c.Bookmarks, *tag)
+	if len(rows) == 0 {
+		if *tag != "" {
+			fmt.Fprintf(out, "no bookmarks tagged %q\n", *tag)
+		} else {
+			fmt.Fprintln(out, "no bookmarks yet - add one with 'bkmr add <url>'")
+		}
+		return nil
+	}
+	sort.SliceStable(rows, func(i, j int) bool { return rows[i].Added.After(rows[j].Added) })
+	for _, b := range rows {
+		fmt.Fprintln(out, formatRow(b))
+	}
+	return nil
+}
+
+// filterByTag keeps the bookmarks carrying tag, or copies the lot when tag is
+// empty. The copy matters: runLs sorts the result, and sorting the collection's
+// own slice in place would reorder what a later writer serializes.
+func filterByTag(all []model.Bookmark, tag string) []model.Bookmark {
+	if tag == "" {
+		return append([]model.Bookmark(nil), all...)
+	}
+	// Normalized the same way stored tags were, so --tag "Async" matches the
+	// "async" on disk.
+	want := model.NormalizeTags([]string{tag})
+	if len(want) == 0 {
+		return nil
+	}
+	var rows []model.Bookmark
+	for _, b := range all {
+		for _, t := range b.Tags {
+			if t == want[0] {
+				rows = append(rows, b)
+				break
+			}
+		}
+	}
+	return rows
+}
+
+// formatRow renders one bookmark as a single stdout line.
+func formatRow(b model.Bookmark) string {
+	row := fmt.Sprintf("%s  %s  %s", b.ID, label(b), b.URL)
+	if len(b.Tags) > 0 {
+		row += "  [" + strings.Join(b.Tags, " ") + "]"
+	}
+	return row
+}
