@@ -47,6 +47,50 @@ func TestLsFiltersByTag(t *testing.T) {
 	}
 }
 
+func TestLsNormalizesTheTagItFiltersOn(t *testing.T) {
+	newVaultForTest(t, "pw")
+	// Stored tags are normalized on the way in, so the query has to be
+	// normalized the same way or --tag would only ever match what the user
+	// happened to type in lower case.
+	addForTest(t, "-t", "Async Rust", "https://a.example")
+
+	got := capture(t, func() {
+		if err := runLs([]string{"--tag", "Async RUST"}); err != nil {
+			t.Fatalf("runLs() error = %v", err)
+		}
+	})
+
+	if !strings.Contains(got, "a.example") {
+		t.Errorf("runLs(--tag %q) = %q, want the bookmark tagged %q", "Async RUST", got, "async-rust")
+	}
+}
+
+func TestLsWithATagNobodyHasUsedSaysSoOffTheStream(t *testing.T) {
+	newVaultForTest(t, "pw")
+	addForTest(t, "-t", "go", "https://b.example")
+
+	stdout, stderr := bothStreams(t, func() {
+		if err := runLs([]string{"--tag", "rust"}); err != nil {
+			t.Fatalf("runLs() error = %v", err)
+		}
+		// Through dispatch too, because the exit status is the half a script
+		// reads: an empty answer to a fair question is success, not a failure.
+		if code := dispatch([]string{"ls", "--tag", "rust"}); code != 0 {
+			t.Errorf("dispatch(ls --tag rust) = %d, want 0", code)
+		}
+	})
+
+	// The notice quotes the user's own tag, so on stdout it would make
+	// 'bkmr ls --tag rust | grep rust' match and report a bookmark that is not
+	// there. The pipe must stay empty when the answer is empty.
+	if stdout != "" {
+		t.Errorf("stdout = %q, want nothing; the notice echoes the query and would be a false positive in a pipe", stdout)
+	}
+	if !strings.Contains(stderr, "rust") {
+		t.Errorf("stderr = %q, want it to name the tag that matched nothing", stderr)
+	}
+}
+
 func TestLsOnAnEmptyVaultSaysSo(t *testing.T) {
 	newVaultForTest(t, "pw")
 

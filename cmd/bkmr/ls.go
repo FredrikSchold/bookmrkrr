@@ -20,9 +20,13 @@ func init() {
 }
 
 // runLs writes bookmark rows and nothing else to out. Someone will pipe this
-// into grep, so no progress, no warnings and no diagnostics may join them - the
-// "no bookmarks" notice is the one non-row line, and it is program output
-// rather than a diagnostic.
+// into grep, so no progress, no warnings and no diagnostics may join them.
+//
+// The "no bookmarks yet" notice is the one non-row line allowed on out: it is
+// program output, and it is fixed text that cannot collide with whatever the
+// reader is searching for. The filtered notice below is not allowed there,
+// because it echoes the user's own tag - 'bkmr ls --tag rust | grep rust' would
+// match the notice and report a bookmark that does not exist.
 func runLs(args []string) error {
 	fs := flag.NewFlagSet("ls", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -44,7 +48,10 @@ func runLs(args []string) error {
 	rows := filterByTag(c.Bookmarks, *tag)
 	if len(rows) == 0 {
 		if *tag != "" {
-			fmt.Fprintf(out, "no bookmarks tagged %q\n", *tag)
+			// A diagnostic, not output, and not an error either: asking for a
+			// tag nobody has used is a fair question with an empty answer, so
+			// the exit status stays 0 and the pipe stays empty.
+			fmt.Fprintf(errOut, "bkmr: no bookmarks tagged %q\n", *tag)
 		} else {
 			fmt.Fprintln(out, "no bookmarks yet - add one with 'bkmr add <url>'")
 		}
