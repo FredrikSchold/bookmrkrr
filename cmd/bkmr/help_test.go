@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -14,6 +15,38 @@ func capture(t *testing.T, fn func()) string {
 	defer func() { out = old }()
 	fn()
 	return buf.String()
+}
+
+// captureErr is capture's counterpart for diagnostics.
+func captureErr(t *testing.T, fn func()) string {
+	t.Helper()
+	var buf bytes.Buffer
+	old := errOut
+	errOut = &buf
+	defer func() { errOut = old }()
+	fn()
+	return buf.String()
+}
+
+// listedCommandNames returns the command names from the listing section of
+// help output, in the order they were printed.
+func listedCommandNames(t *testing.T, help string) []string {
+	t.Helper()
+	_, rest, ok := strings.Cut(help, "commands:\n")
+	if !ok {
+		t.Fatalf("help output has no commands section: %q", help)
+	}
+	body, _, ok := strings.Cut(rest, "\nRun '")
+	if !ok {
+		t.Fatalf("help output has no trailing hint: %q", help)
+	}
+	var names []string
+	for _, line := range strings.Split(body, "\n") {
+		if fields := strings.Fields(line); len(fields) > 0 {
+			names = append(names, fields[0])
+		}
+	}
+	return names
 }
 
 func TestHelpListsEveryCommand(t *testing.T) {
@@ -33,6 +66,14 @@ func TestHelpListsEveryCommand(t *testing.T) {
 	}
 	if !strings.Contains(got, "bkmr") {
 		t.Error("help output does not mention the binary name")
+	}
+
+	listed := listedCommandNames(t, got)
+	if len(listed) != len(commands) {
+		t.Errorf("help listed %d commands %v, want %d", len(listed), listed, len(commands))
+	}
+	if !slices.IsSorted(listed) {
+		t.Errorf("help listing is not sorted by name: %v", listed)
 	}
 }
 
@@ -58,12 +99,18 @@ func TestHelpFlagsAreAliases(t *testing.T) {
 }
 
 func TestUnknownCommandExitsTwo(t *testing.T) {
-	got := capture(t, func() {
-		if code := dispatch([]string{"nosuchcommand"}); code != 2 {
-			t.Errorf("dispatch(unknown) = %d, want 2", code)
-		}
+	var stdout string
+	got := captureErr(t, func() {
+		stdout = capture(t, func() {
+			if code := dispatch([]string{"nosuchcommand"}); code != 2 {
+				t.Errorf("dispatch(unknown) = %d, want 2", code)
+			}
+		})
 	})
 
+	if stdout != "" {
+		t.Errorf("stdout = %q, want nothing; an error must not land in the pipe", stdout)
+	}
 	if !strings.Contains(got, "nosuchcommand") {
 		t.Errorf("output = %q, want it to name the unknown command", got)
 	}

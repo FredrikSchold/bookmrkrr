@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"slices"
+	"strings"
 	"text/tabwriter"
 )
 
@@ -24,9 +26,15 @@ func runHelp(args []string) error {
 		return nil
 	}
 
+	// Listed by name, not in registration order: registration order follows
+	// source filenames, which is no business of the user's. Sort a copy, since
+	// the registration order of commands itself is left alone.
+	listing := slices.Clone(commands)
+	slices.SortFunc(listing, func(a, b command) int { return strings.Compare(a.Name, b.Name) })
+
 	fmt.Fprint(out, "bkmr - terminal-first bookmarks in a locally encrypted vault\n\nusage: bkmr <command> [arguments]\n\ncommands:\n")
 	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	for _, c := range commands {
+	for _, c := range listing {
 		fmt.Fprintf(w, "  %s\t%s\n", c.Name, c.Summary)
 	}
 	w.Flush()

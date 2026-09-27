@@ -11,8 +11,12 @@ import (
 
 const version = "0.1.0"
 
-// out is where all user-facing output goes, so tests can capture it.
-var out io.Writer = os.Stdout
+// out receives user-facing program output; errOut receives diagnostics.
+// Both are variables so tests can capture them.
+var (
+	out    io.Writer = os.Stdout
+	errOut io.Writer = os.Stderr
+)
 
 type command struct {
 	Name    string
@@ -61,15 +65,15 @@ func dispatch(args []string) int {
 
 	c, ok := find(name)
 	if !ok {
-		fmt.Fprintf(out, "bkmr: unknown command %q\nRun 'bkmr help' for the list of commands.\n", name)
+		fmt.Fprintf(errOut, "bkmr: unknown command %q\nRun 'bkmr help' for the list of commands.\n", name)
 		return 2
 	}
 	if err := c.Run(args); err != nil {
 		if errors.Is(err, errUsage) {
-			fmt.Fprintf(out, "usage: %s\n", c.Usage)
+			fmt.Fprintf(errOut, "usage: %s\n", c.Usage)
 			return 2
 		}
-		fmt.Fprintln(os.Stderr, "bkmr:", err)
+		fmt.Fprintln(errOut, "bkmr:", err)
 		return 1
 	}
 	return 0
