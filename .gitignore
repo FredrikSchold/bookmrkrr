@@ -1,0 +1,7 @@
+/bkmr
+/bkmr.exe
+/dist/
+*.bkmr
+*.bkmr.bak
+*.bkmr.tmp
+vault.lock
