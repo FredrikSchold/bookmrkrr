@@ -31,6 +31,9 @@ func TestCreateThenLoadGivesAnEmptyCollection(t *testing.T) {
 	if !Exists(dir) {
 		t.Fatal("Exists() = false after Create()")
 	}
+	if Exists(t.TempDir()) {
+		t.Error("Exists() = true for a directory with no vault in it")
+	}
 	c, err := v.Load()
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
@@ -96,6 +99,9 @@ func TestSaveLeavesTheOldVaultAsBackup(t *testing.T) {
 	}
 	if _, err := os.Stat(v.Path() + ".tmp"); !os.IsNotExist(err) {
 		t.Error("Save() left a .tmp file behind")
+	}
+	if _, err := os.Stat(v.Path() + ".bak.tmp"); !os.IsNotExist(err) {
+		t.Error("Save() left a .bak.tmp file behind")
 	}
 }
 

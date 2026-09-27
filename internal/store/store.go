@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
@@ -21,7 +22,10 @@ const FileName = "vault.bkmr"
 var ErrBusy = errors.New("vault is busy - another bkmr is writing to it")
 
 // renameFile is a seam so a test can fail the one rename that publishes a new
-// vault. It is never reassigned outside tests.
+// vault. It is never reassigned outside tests, and a test that swaps it must
+// not call t.Parallel() or run alongside anything else in this package: it is a
+// plain package-level variable with no synchronisation, so concurrent use would
+// be a genuine data race the moment CI runs with -race.
 var renameFile = os.Rename
 
 // Vault is an encrypted bookmark collection on disk.
@@ -37,9 +41,14 @@ func New(dir string, key []byte) *Vault { return &Vault{dir: dir, key: key} }
 func (v *Vault) Path() string { return filepath.Join(v.dir, FileName) }
 
 // Exists reports whether a vault file is present in dir.
+//
+// Only a genuine "not found" counts as absent. A permission problem or an I/O
+// fault means we cannot prove there is no vault, and answering false would let
+// bkmr init - which consults nothing else - create a fresh empty vault on top of
+// a real one.
 func Exists(dir string) bool {
 	_, err := os.Stat(filepath.Join(dir, FileName))
-	return err == nil
+	return !errors.Is(err, fs.ErrNotExist)
 }
 
 // Create writes a new empty vault. It refuses to overwrite an existing one.
@@ -52,9 +61,6 @@ func Exists(dir string) bool {
 // key and be told the vault is corrupt.
 func Create(dir string, key, salt []byte) error {
 	path := filepath.Join(dir, FileName)
-	if _, err := os.Stat(path); err == nil {
-		return fmt.Errorf("a vault already exists at %s", path)
-	}
 	plain, err := json.Marshal(&model.Collection{Version: model.Version, Bookmarks: []model.Bookmark{}})
 	if err != nil {
 		return err
@@ -63,7 +69,34 @@ func Create(dir string, key, salt []byte) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, blob, 0o600)
+
+	// O_EXCL, not Stat-then-write. The refusal has to be the same syscall as the
+	// create: with a separate check, a vault that came into existence in the gap
+	// would be truncated to a fresh empty collection, and the user's bookmarks
+	// would be gone with no error to show for it. Sealing first also means a
+	// failure there leaves no file behind at all.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		if os.IsExist(err) {
+			return fmt.Errorf("a vault already exists at %s", path)
+		}
+		return err
+	}
+	if _, err := f.Write(blob); err != nil {
+		f.Close()
+		os.Remove(path)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(path)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(path)
+		return err
+	}
+	return nil
 }
 
 // Load decrypts and parses the vault.
@@ -98,6 +131,10 @@ func (v *Vault) Save(c *model.Collection) error {
 // Mutate reloads the vault under the write lock, applies fn, and saves the
 // result. Every writer must use this rather than Load-then-Save, or a
 // concurrent add made in between would be silently discarded.
+//
+// fn must not call Save or Mutate itself. The lock is a plain file-creation
+// lock with no reentrancy, so a nested writer would spin against a lock this
+// same goroutine is holding and return ErrBusy a second later.
 func (v *Vault) Mutate(fn func(*model.Collection) error) error {
 	release, err := v.lock()
 	if err != nil {
@@ -156,10 +193,8 @@ func (v *Vault) write(c *model.Collection) error {
 	// would unlink vault.bkmr, and if the rename below then failed the vault
 	// would be absent from disk entirely: the next command would report "no
 	// vault found", and bkmr init - which only checks Exists() - would create a
-	// fresh empty vault on top of the user's bookmarks. A crash partway through
-	// this copy leaves a truncated .bak, which is an acceptable trade because
-	// the vault itself is still intact and openable.
-	if err := os.WriteFile(v.Path()+".bak", blob, 0o600); err != nil {
+	// fresh empty vault on top of the user's bookmarks.
+	if err := writeBackup(v.Path()+".bak", blob); err != nil {
 		os.Remove(tmp)
 		return err
 	}
@@ -167,6 +202,46 @@ func (v *Vault) write(c *model.Collection) error {
 	// every supported platform, so a reader sees either the old file or the new
 	// one and never a partial write.
 	if err := renameFile(tmp, v.Path()); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+// writeBackup replaces path with data atomically, via a sibling temp file that
+// is fsynced and then renamed into place.
+//
+// os.WriteFile would truncate the existing backup before writing, so a crash
+// partway through would destroy the backup already on disk rather than merely
+// fail to produce a new one. That is the one property the old rename-based
+// protocol had, and this restores it without reintroducing the window where no
+// vault file exists.
+//
+// This calls os.Rename directly rather than the renameFile seam on purpose. The
+// seam exists so a test can fail the rename that publishes a new vault; routing
+// this one through it as well would make that test abort here instead, before it
+// ever reached the step it means to exercise.
+func writeBackup(path string, data []byte) error {
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
 		os.Remove(tmp)
 		return err
 	}
