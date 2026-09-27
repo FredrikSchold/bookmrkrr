@@ -5,3 +5,7 @@
 *.bkmr.bak
 *.bkmr.tmp
 vault.lock
+
+# The golden vault fixture is a permanent format-v1 regression test and must
+# stay tracked, even though real vaults are ignored above.
+!internal/crypto/testdata/golden_v1.bkmr
