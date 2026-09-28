@@ -353,3 +353,42 @@ func TestAnInvalidByteIsLeftAloneRatherThanTreatedAsC1(t *testing.T) {
 		t.Errorf("Add() Title = %q, want %q", got.Title, want)
 	}
 }
+
+// Vertical tab and form feed are whitespace, and dropControls' whole reason for
+// mapping the whitespace controls to a space rather than deleting them is that
+// deleting one jams two words together. These two were being deleted, so
+// "two\vwords" became "twowords" - the invariant the comment claimed, broken by
+// the code under it. It mattered twice: in a title, and in NormalizeTags, where
+// the same string used to split into two words on either side of a hyphen.
+func TestVerticalTabAndFormFeedBecomeSpaces(t *testing.T) {
+	for _, tt := range []struct{ name, in, want string }{
+		{"vertical tab", "two\vwords", "two words"},
+		{"form feed", "two\fwords", "two words"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &Collection{Version: Version}
+			got, _, err := c.Add(Bookmark{URL: "https://example.com", Title: tt.in})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Title != tt.want {
+				t.Errorf("Add() Title = %q, want %q", got.Title, tt.want)
+			}
+
+			// And in a note, where the line breaks are kept but these are not
+			// line breaks worth keeping.
+			c2 := &Collection{Version: Version}
+			got2, _, err := c2.Add(Bookmark{URL: "https://example.com", Notes: tt.in})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got2.Notes != tt.want {
+				t.Errorf("Add() Notes = %q, want %q", got2.Notes, tt.want)
+			}
+
+			if tags := NormalizeTags([]string{tt.in}); len(tags) != 1 || tags[0] != "two-words" {
+				t.Errorf("NormalizeTags(%q) = %q, want [two-words]", tt.in, tags)
+			}
+		})
+	}
+}

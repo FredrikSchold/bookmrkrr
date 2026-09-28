@@ -247,11 +247,18 @@ func isControl(r rune) bool {
 	return r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f)
 }
 
-// dropControls removes every control character. Tab, newline and carriage
-// return are the exception: they become the space they were standing in for, so
-// that removing one cannot jam two words together. A caller that wants real line
-// breaks kept - a note - passes keepLines, and then a CRLF becomes a plain LF
-// rather than leaving a stray carriage return behind.
+// dropControls removes every control character. The five that are whitespace -
+// tab, newline, vertical tab, form feed and carriage return - are the exception:
+// they become the space they were standing in for, so that removing one cannot
+// jam two words together. That is the whole reason the exception exists, so it
+// has to cover all five: leaving vertical tab and form feed to be deleted turned
+// "two\vwords" into "twowords" and, in NormalizeTags, cost a hyphen that the
+// same string used to get from strings.Fields.
+//
+// A caller that wants real line breaks kept - a note - passes keepLines. Only
+// tab and newline are kept then: a CRLF becomes a plain LF rather than leaving a
+// stray carriage return behind, and vertical tab and form feed are not line
+// breaks worth preserving in a note.
 func dropControls(s string, keepLines bool) string {
 	return strings.Map(func(r rune) rune {
 		switch r {
@@ -259,6 +266,8 @@ func dropControls(s string, keepLines bool) string {
 			if keepLines {
 				return r
 			}
+			return ' '
+		case '\v', '\f':
 			return ' '
 		case '\r':
 			if keepLines {
