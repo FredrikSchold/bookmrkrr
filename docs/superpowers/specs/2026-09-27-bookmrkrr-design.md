@@ -308,12 +308,12 @@ Development follows TDD throughout.
 
 ## 12. Dependencies
 
-Eight direct dependencies, because a small dependency tree is itself a privacy
+Nine direct dependencies, because a small dependency tree is itself a privacy
 feature:
 
 `bubbletea`, `bubbles`, `lipgloss`, `sahilm/fuzzy`, `atotto/clipboard` (pure
 Go, shells out to platform tools), `zalando/go-keyring`, `golang.org/x/crypto`
-(argon2, chacha20poly1305, term), and `BurntSushi/toml`.
+(argon2, chacha20poly1305), `golang.org/x/term`, and `BurntSushi/toml`.
 
 Everything else is the standard library. No CGO, so cross-compilation stays a
 single command.
