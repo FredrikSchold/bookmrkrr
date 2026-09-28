@@ -44,7 +44,10 @@ func runOpen(args []string) error {
 	for i, it := range items {
 		hay[i] = it.Filter
 	}
-	matches := fuzzy.Find(strings.ToLower(query), hay)
+	// query as typed: sahilm/fuzzy compares with equalFold, so it is already
+	// case-insensitive and lowercasing one side only invites someone to
+	// "correct" the asymmetry on the wrong side later.
+	matches := fuzzy.Find(query, hay)
 	if len(matches) == 0 {
 		return fmt.Errorf("no bookmark matches %q", query)
 	}

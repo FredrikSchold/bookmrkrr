@@ -37,15 +37,20 @@ type Item struct {
 	Tags   []string
 }
 
+// The styles are the Render methods rather than the Style values, so a test can
+// swap in renderers that actually emit escape sequences. It has to be able to:
+// lipgloss's default renderer sees that go test's stdout is not a terminal and
+// strips every attribute, so a row rendered with these under test contains no
+// escapes at all, and an assertion about severing one would pass however broken
+// the clipping was.
 var (
-	styleSelected = lipgloss.NewStyle().Bold(true).Reverse(true)
-	styleDetail   = lipgloss.NewStyle().Faint(true)
-	styleHelp     = lipgloss.NewStyle().Faint(true)
+	styleSelected = lipgloss.NewStyle().Bold(true).Reverse(true).Render
+	styleDetail   = lipgloss.NewStyle().Faint(true).Render
+	styleHelp     = lipgloss.NewStyle().Faint(true).Render
 )
 
 // Model is the picker's bubbletea model.
 type Model struct {
-	prompt  string
 	all     []Item
 	visible []Item
 	cursor  int
@@ -55,6 +60,13 @@ type Model struct {
 	chosen  Item
 	action  Action
 	done    bool
+
+	// emptyMessage and tagNoun are the only words in this package that name
+	// what is being picked, and both are replaceable. Nothing else here may
+	// mention bookmarks: Task 11 reuses this picker for browser tabs, and a
+	// tab picker telling someone to run 'bkmr add <url>' would be nonsense.
+	emptyMessage string
+	tagNoun      string
 
 	tagMode   bool
 	activeTag string
@@ -67,7 +79,31 @@ func New(items []Item, prompt string) Model {
 	in.Prompt = prompt + " "
 	in.Focus()
 
-	m := Model{prompt: prompt, all: items, input: in, width: 80, height: 24}
+	m := Model{
+		all:    items,
+		input:  in,
+		width:  80,
+		height: 24,
+		// The defaults name bookmarks, because that is the caller this package
+		// was written for and the common case should need no ceremony.
+		emptyMessage: "no bookmarks yet - add one with 'bkmr add <url>'",
+		tagNoun:      "bookmarks",
+	}
+	m.buildTagRows()
+	m.refilter()
+	return m
+}
+
+// WithEmptyMessage replaces the line shown when there is nothing at all to pick.
+func (m Model) WithEmptyMessage(msg string) Model {
+	m.emptyMessage = msg
+	return m
+}
+
+// WithTagNoun names what a tag's count counts, for tag mode's "3 bookmarks". It
+// rebuilds the tag rows, so it may be called at any point after New.
+func (m Model) WithTagNoun(noun string) Model {
+	m.tagNoun = noun
 	m.buildTagRows()
 	m.refilter()
 	return m
@@ -117,7 +153,7 @@ func (m *Model) buildTagRows() {
 		m.tagRows = append(m.tagRows, Item{
 			ID:     name,
 			Label:  name,
-			Detail: fmt.Sprintf("%d bookmarks", counts[name]),
+			Detail: fmt.Sprintf("%d %s", counts[name], m.tagNoun),
 			Filter: name,
 		})
 	}
@@ -245,19 +281,25 @@ func (m Model) View() string {
 	b.WriteString(m.input.View())
 	b.WriteString("\n")
 
-	if m.tagMode {
-		b.WriteString(styleHelp.Render("tag mode - enter to filter by a tag, tab or esc to go back") + "\n")
-	} else if m.activeTag != "" {
-		b.WriteString(styleHelp.Render("filtering by tag: "+m.activeTag+" (tab to clear)") + "\n")
+	banner := 0
+	switch {
+	case m.tagMode:
+		b.WriteString(styleHelp("tag mode - enter to filter by a tag, tab or esc to go back") + "\n")
+		banner = 1
+	case m.activeTag != "":
+		b.WriteString(styleHelp("filtering by tag: "+m.activeTag+" (tab to clear)") + "\n")
+		banner = 1
 	}
 
 	if len(m.all) == 0 {
-		b.WriteString("no bookmarks yet - add one with 'bkmr add <url>'\n")
+		b.WriteString(m.emptyMessage + "\n")
 		return b.String()
 	}
 
-	// Reserve the query line, the mode banner, the help line, and one blank.
-	rows := m.height - 4
+	// Reserve the query line, the help line, one blank, and the mode banner
+	// only when one was actually printed, so the common case does not give up a
+	// row to a banner that is not there.
+	rows := m.height - 3 - banner
 	if rows < 1 {
 		rows = 1
 	}
@@ -270,32 +312,75 @@ func (m Model) View() string {
 		start = m.cursor - rows + 1
 	}
 	for i := start; i < start+rows && i < len(m.visible); i++ {
-		it := m.visible[i]
-		line := fmt.Sprintf("%s  %s", it.Label, styleDetail.Render(it.Detail))
-		if i == m.cursor {
-			line = styleSelected.Render(" "+it.Label+" ") + " " + styleDetail.Render(it.Detail)
-		}
-		b.WriteString(truncate(line, m.width) + "\n")
+		b.WriteString(renderRow(m.visible[i], i == m.cursor, m.width) + "\n")
 	}
 	if len(m.visible) == 0 {
 		b.WriteString("no matches\n")
 	}
-	b.WriteString(styleHelp.Render("enter open · tab tags · ctrl+y copy · ctrl+d delete · esc quit"))
+	b.WriteString(styleHelp("enter open · tab tags · ctrl+y copy · ctrl+d delete · esc quit"))
 	return b.String()
 }
 
-func truncate(s string, width int) string {
+// renderRow lays one row out in plain text, clips it to the terminal's width,
+// and only then applies the styles.
+//
+// The order is the whole point. Clipping a string that has already been styled
+// cuts the trailing reset off first, because lipgloss.Width measures display
+// columns while the cut counts runes and an escape sequence's bytes are runes.
+// Reverse video or faint then bleeds into every following line of the frame,
+// and a cut narrow enough to land inside the leading CSI takes the newline with
+// it. The trigger is any terminal narrower than the widest rendered row - a
+// 40-column split pane against an 80-character URL truncates every row - so it
+// is the ordinary case, not an edge one. Styling last makes the escapes
+// structurally uncuttable: clip never sees one.
+func renderRow(it Item, selected bool, width int) string {
+	label, gap, detail := it.Label, "  ", it.Detail
+	if selected {
+		label, gap = " "+label+" ", " "
+	}
+
+	// A width of zero means nobody has said how wide the terminal is, so
+	// clipping would be a guess. Bubbletea sends a real size before the first
+	// paint on a real terminal.
+	if width > 0 {
+		label = clip(label, width)
+		if room := width - lipgloss.Width(label) - len(gap); room <= 0 {
+			gap, detail = "", ""
+		} else {
+			detail = clip(detail, room)
+		}
+	}
+
+	if selected {
+		label = styleSelected(label)
+	}
+	if detail == "" {
+		return label
+	}
+	return label + gap + styleDetail(detail)
+}
+
+// clip cuts plain text down to width display columns. It must only ever be
+// handed text with no escape sequences in it - see renderRow - and it counts
+// columns rather than runes, so a wide rune cannot overrun the budget either.
+func clip(s string, width int) string {
 	if width <= 0 {
-		return s
+		return ""
 	}
 	if lipgloss.Width(s) <= width {
 		return s
 	}
-	r := []rune(s)
-	if len(r) > width {
-		r = r[:width]
+	var b strings.Builder
+	used := 0
+	for _, r := range s {
+		w := lipgloss.Width(string(r))
+		if used+w > width {
+			break
+		}
+		b.WriteRune(r)
+		used += w
 	}
-	return string(r)
+	return b.String()
 }
 
 // Run displays the picker and returns what the user chose.

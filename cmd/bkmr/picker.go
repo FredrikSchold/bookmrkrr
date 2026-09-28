@@ -25,6 +25,19 @@ func init() {
 }
 
 func runPicker([]string) error {
+	// Not a terminal: behave like ls so the command stays pipe-safe. An
+	// alt-screen program writing into a pipe produces escape sequences nobody
+	// asked for, and 'bkmr | grep rust' is a reasonable thing to type.
+	//
+	// Checked before the vault is touched. In the other order 'bkmr | grep'
+	// decrypts the vault, discovers stdout is not a terminal, and hands off to
+	// runLs, which decrypts it a second time. With no key cached that is two
+	// password prompts for one command, not one: the prompt reads stdin, which
+	// is still a terminal in a pipeline, so nothing refuses the second one.
+	if !term.IsTerminal(int(os.Stdout.Fd())) {
+		return runLs(nil)
+	}
+
 	v, err := openVault()
 	if err != nil {
 		return err
@@ -34,44 +47,55 @@ func runPicker([]string) error {
 		return explainVaultError(err)
 	}
 
-	// Not a terminal: behave like ls so the command stays pipe-safe. An
-	// alt-screen program writing into a pipe produces escape sequences nobody
-	// asked for, and 'bkmr | grep rust' is a reasonable thing to type.
-	if !term.IsTerminal(int(os.Stdout.Fd())) {
-		return runLs(nil)
-	}
-
 	item, action, err := tui.Run(tui.New(itemsFor(c.Bookmarks), "search"))
 	if err != nil {
 		return err
 	}
+	return applyPickerAction(v, item, action)
+}
+
+// applyPickerAction carries out what the picker's user asked for. It is split
+// out from runPicker because runPicker needs a terminal and this does not: the
+// writes are all here, so this is the half a test can drive.
+func applyPickerAction(v *store.Vault, item tui.Item, action tui.Action) error {
 	switch action {
-	case tui.ActionNone:
-		return nil
 	case tui.ActionOpen:
 		return openByID(v, item.ID)
+
 	case tui.ActionCopy:
-		b, ok := c.Find(item.ID)
-		if !ok {
-			return fmt.Errorf("bookmark %s vanished", item.ID)
-		}
-		if err := clipboard.WriteAll(b.URL); err != nil {
+		// item.Detail is the URL the picker had on screen, which is the URL the
+		// user was looking at when they pressed the key. Looking it up again in
+		// the collection loaded before the picker opened would be no fresher
+		// and could be staler - a concurrent 'bkmr edit' would put the old URL
+		// on the clipboard - and the lookup could not fail anyway, since the
+		// item came from that same snapshot.
+		if err := clipboard.WriteAll(item.Detail); err != nil {
 			return err
 		}
-		fmt.Fprintln(out, "copied", b.URL)
+		fmt.Fprintln(out, "copied", item.Detail)
 		return nil
+
 	case tui.ActionDelete:
 		// Mutate, so an add made while the picker was open is not discarded,
-		// and the existence check happens inside the mutation against the
+		// and the existence check runs inside the mutation against the
 		// collection as it is now rather than against what the picker showed.
-		return explainVaultError(v.Mutate(func(c *model.Collection) error {
+		if err := v.Mutate(func(c *model.Collection) error {
 			if !c.Delete(item.ID) {
 				return fmt.Errorf("bookmark %s no longer exists", item.ID)
 			}
-			fmt.Fprintln(out, "deleted", item.ID)
 			return nil
-		}))
+		}); err != nil {
+			return explainVaultError(err)
+		}
+		// Reported only once Mutate has returned. Mutate writes the file after
+		// its closure returns, so saying this from inside would announce
+		// "deleted" on stdout and then fail on stderr with the bookmark still
+		// in the vault - the same dishonesty 'bkmr lock' was fixed for.
+		fmt.Fprintln(out, "deleted", item.ID)
+		return nil
 	}
+	// ActionNone: the user quit without choosing, which is not an error and
+	// deserves no output.
 	return nil
 }
 
@@ -121,5 +145,10 @@ func openByID(v *store.Vault, id string) error {
 	}); err != nil {
 		return explainVaultError(err)
 	}
+	// Called after Mutate has returned, so no browser starts while the write
+	// lock is held. A launch that then fails leaves the visit recorded, which
+	// is the lesser of the two wrongs available: recording afterwards instead
+	// would lose the visit on every failed write, and a ranking short one open
+	// is a smaller lie than an open that never counted at all.
 	return tui.Open(url)
 }
