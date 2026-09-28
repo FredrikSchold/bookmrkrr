@@ -43,6 +43,12 @@ type Item struct {
 // strips every attribute, so a row rendered with these under test contains no
 // escapes at all, and an assertion about severing one would pass however broken
 // the clipping was.
+//
+// They are never reassigned outside tests, and a test that swaps them must not
+// call t.Parallel() or run alongside anything else in this package: these are
+// plain package-level variables with no synchronisation, so concurrent use would
+// be a genuine data race the moment CI runs with -race. internal/store carries
+// the same warning on its renameFile seam, for the same reason.
 var (
 	styleSelected = lipgloss.NewStyle().Bold(true).Reverse(true).Render
 	styleDetail   = lipgloss.NewStyle().Faint(true).Render
@@ -253,8 +259,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m.finish(ActionOpen)
 		case tea.KeyCtrlY:
+			// Guarded like Enter above: in tag mode the highlighted row is a
+			// tag, not a bookmark, so copying or deleting it is meaningless.
+			// Letting one through handed the caller Item{ID: "rust", Detail:
+			// "2 bookmarks"}, which the copy path cheerfully put on the
+			// clipboard and reported as a success. Both keys are guarded even
+			// though delete happens to fail cleanly on its own: the asymmetry
+			// is exactly the kind of thing that decays.
+			if m.tagMode {
+				return m, nil
+			}
 			return m.finish(ActionCopy)
 		case tea.KeyCtrlD:
+			if m.tagMode {
+				return m, nil
+			}
 			return m.finish(ActionDelete)
 		case tea.KeyUp, tea.KeyCtrlP:
 			if m.cursor > 0 {

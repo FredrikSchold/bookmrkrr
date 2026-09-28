@@ -120,3 +120,32 @@ func TestEnterInTagModeOnAnEmptyTagListDoesNothing(t *testing.T) {
 		t.Error("Done() = true, want false")
 	}
 }
+
+// Tag mode's rows are tags, not bookmarks, so the row-level actions must not
+// fire there at all.
+//
+// This closes a class rather than an instance. Reaching applyPickerAction with a
+// tag row made the copy path write the tag's own Detail to the clipboard and
+// report "copied 2 bookmarks" - a success message for something that did not
+// happen. Guarding inside Update means no caller can be handed a tag row as
+// though it were a bookmark, whatever it chooses to do with one.
+func TestRowActionsDoNothingInTagMode(t *testing.T) {
+	for _, key := range []tea.KeyType{tea.KeyCtrlY, tea.KeyCtrlD} {
+		m := press(sizeIt(New(tagged(), "search"), 80, 24), tea.KeyTab)
+		if !m.TagMode() {
+			t.Fatal("TagMode() = false after Tab, want true")
+		}
+
+		m = press(m, key)
+		item, action := m.Chosen()
+		if action != ActionNone {
+			t.Errorf("key %v in tag mode chose %v on row %+v, want ActionNone", key, action, item)
+		}
+		if m.Done() {
+			t.Errorf("Done() = true after %v in tag mode, want false", key)
+		}
+		if !m.TagMode() {
+			t.Errorf("TagMode() = false after %v, want it to stay in tag mode", key)
+		}
+	}
+}
