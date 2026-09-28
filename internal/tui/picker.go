@@ -499,6 +499,12 @@ func renderRow(it Item, selected bool, width int) string {
 // clip cuts plain text down to width display columns. It must only ever be
 // handed text with no escape sequences in it - see renderRow - and it counts
 // columns rather than runes, so a wide rune cannot overrun the budget either.
+//
+// That precondition now has an owner rather than being a convention: control
+// characters are stripped from every title, note and tag by internal/model,
+// which is where all of them enter the vault, and cmd/bkmr applies the same
+// model.CleanTitle to a browser tab's title before this package ever sees it.
+// Do not add a second pass here - one owner, at the boundary where data enters.
 func clip(s string, width int) string {
 	if width <= 0 {
 		return ""

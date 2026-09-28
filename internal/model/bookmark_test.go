@@ -188,3 +188,168 @@ func TestAddPreservesExplicitTimestamps(t *testing.T) {
 		t.Errorf("Add() Added = %v, want %v", got.Added, when)
 	}
 }
+
+// Titles and notes reach the vault from places that are not the user: a page's
+// own <title>, a browser tab, and - from Task 12 - an imported bookmarks file.
+// All three are printed straight to a terminal afterwards by ls, by the picker
+// and by the saved line, so an ESC in one of them is a terminal-injection
+// vector: it can move the cursor, clear the screen, recolour everything that
+// follows, or on some terminals set the window title. Add is where every title
+// enters, so it is where they are stripped.
+func TestAddStripsControlCharactersFromATitle(t *testing.T) {
+	c := &Collection{Version: Version}
+
+	got, _, err := c.Add(Bookmark{
+		URL:   "https://example.com",
+		Title: "\x1b[31mRed\x1b[0m\x07 and \x1bc reset\x7f\u009b2J",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "[31mRed[0m and c reset2J"; got.Title != want {
+		t.Errorf("Add() Title = %q, want %q", got.Title, want)
+	}
+	for _, r := range got.Title {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			t.Errorf("Add() Title = %q, still contains control character U+%04X", got.Title, r)
+		}
+	}
+}
+
+// A title is one line. The whitespace controls become the space they were
+// standing in for rather than vanishing, so two words are never jammed
+// together, and runs collapse.
+func TestAddCollapsesWhitespaceInATitle(t *testing.T) {
+	c := &Collection{Version: Version}
+
+	got, _, err := c.Add(Bookmark{URL: "https://example.com", Title: "Two\n\tLines  Here\r\n"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "Two Lines Here"; got.Title != want {
+		t.Errorf("Add() Title = %q, want %q", got.Title, want)
+	}
+}
+
+// Notes are the one field that is legitimately multi-line - Add itself joins a
+// merged note onto an existing one with a newline - so line breaks and tabs
+// survive and everything else in the control ranges does not. A CRLF becomes a
+// plain LF rather than leaving a stray carriage return behind.
+func TestAddStripsControlCharactersFromNotesButKeepsLineBreaks(t *testing.T) {
+	c := &Collection{Version: Version}
+
+	got, _, err := c.Add(Bookmark{
+		URL:   "https://example.com",
+		Notes: "first\x1b[31m line\r\n\tsecond\x00 line\u009b",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "first[31m line\n\tsecond line"; got.Notes != want {
+		t.Errorf("Add() Notes = %q, want %q", got.Notes, want)
+	}
+}
+
+// The merge branch writes a title and appends a note of its own, so it needs the
+// same treatment. A fix applied to only the new-bookmark branch would leave
+// re-adding a URL as an open door.
+func TestAddStripsControlCharactersWhenMerging(t *testing.T) {
+	c := &Collection{Version: Version}
+	if _, _, err := c.Add(Bookmark{URL: "https://example.com"}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, merged, err := c.Add(Bookmark{
+		URL:   "https://example.com",
+		Title: "\x1bcWiped",
+		Notes: "\x1b[2Jcleared",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !merged {
+		t.Fatal("Add() merged = false, want true")
+	}
+	if want := "cWiped"; got.Title != want {
+		t.Errorf("merged Title = %q, want %q", got.Title, want)
+	}
+	if want := "[2Jcleared"; got.Notes != want {
+		t.Errorf("merged Notes = %q, want %q", got.Notes, want)
+	}
+}
+
+// NormalizeTags joins on strings.Fields, which splits on unicode.IsSpace - and
+// ESC, NUL, BEL, DEL and CSI are not space. So the tag path did NOT already
+// strip these, whatever it looks like it does, and a tag is printed by ls, by
+// the picker and by tag mode's own rows.
+func TestNormalizeTagsStripsControlCharacters(t *testing.T) {
+	got := NormalizeTags([]string{"\x1b[31mred\x1b[0m", "two\x00words"})
+
+	for _, tag := range got {
+		for _, r := range tag {
+			if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+				t.Errorf("NormalizeTags() = %q, tag %q still contains U+%04X", got, tag, r)
+			}
+		}
+	}
+	if len(got) != 2 {
+		t.Fatalf("NormalizeTags() = %q, want 2 tags", got)
+	}
+	if got[0] != "[31mred[0m" {
+		t.Errorf("NormalizeTags()[0] = %q, want %q", got[0], "[31mred[0m")
+	}
+	if got[1] != "twowords" {
+		t.Errorf("NormalizeTags()[1] = %q, want %q", got[1], "twowords")
+	}
+}
+
+// Control characters are the line, and nothing else moves. Right-to-left marks
+// and zero-width characters can make a title display confusingly, but they are
+// legitimate text in real page titles - stripping them would corrupt titles for
+// a large fraction of the web, including every Arabic and Hebrew page.
+func TestAddLeavesOrdinaryUnicodeAlone(t *testing.T) {
+	c := &Collection{Version: Version}
+	title := "\u200fشبكة\u200e \u200bزero-width\u00a0nbsp — Go 日本語 🦀"
+
+	got, _, err := c.Add(Bookmark{URL: "https://example.com", Title: title})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The nbsp is whitespace to strings.Fields, so it collapses like any other
+	// space; every other rune survives untouched.
+	if want := "\u200fشبكة\u200e \u200bزero-width nbsp — Go 日本語 🦀"; got.Title != want {
+		t.Errorf("Add() Title = %q, want %q", got.Title, want)
+	}
+}
+
+// CleanTitle is exported because the tab picker shows a browser-supplied title
+// before anything is saved, and Find hands out a writable *Bookmark. Both need
+// the same rule, and there must be exactly one of it.
+func TestCleanTitleIsIdempotent(t *testing.T) {
+	once := CleanTitle("\x1b[31m  Red \n Thing \x07")
+	if twice := CleanTitle(once); twice != once {
+		t.Errorf("CleanTitle(CleanTitle(x)) = %q, want %q", twice, once)
+	}
+	if once != "[31m Red Thing" {
+		t.Errorf("CleanTitle() = %q, want %q", once, "[31m Red Thing")
+	}
+}
+
+// The C1 range has two spellings and only one of them is a control character.
+// A valid UTF-8 U+009B is CSI and survives a JSON round trip untouched, so it
+// really would reach the vault and the terminal: that is what isControl is for.
+// A lone 0x9B byte is not valid UTF-8; it decodes as U+FFFD, no terminal in
+// UTF-8 mode acts on it, and encoding/json replaces it on the way into the vault
+// regardless. It is ordinary text as far as this package is concerned, and is
+// left alone rather than being guessed at.
+func TestAnInvalidByteIsLeftAloneRatherThanTreatedAsC1(t *testing.T) {
+	c := &Collection{Version: Version}
+
+	got, _, err := c.Add(Bookmark{URL: "https://example.com", Title: "a" + string([]byte{0x9b}) + "b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "a\ufffdb"; got.Title != want {
+		t.Errorf("Add() Title = %q, want %q", got.Title, want)
+	}
+}

@@ -105,9 +105,14 @@ func runTab(args []string) error {
 		return nil
 	}
 
+	// model.CleanTitle here, not only inside Add. A page controls its own
+	// document.title, so a tab title can carry an escape sequence, and this
+	// picker puts it on screen before anything is saved - cleaning it at storage
+	// time would be too late for the frame the picker draws. Add applies the
+	// same rule again on the way into the vault; it is idempotent.
 	choices := make([]tabChoice, len(tabs))
 	for i, t := range tabs {
-		choices[i] = tabChoice{Title: t.Title, URL: t.URL}
+		choices[i] = tabChoice{Title: model.CleanTitle(t.Title), URL: t.URL}
 	}
 	picked, ok, err := chooseTab(choices)
 	if err != nil {

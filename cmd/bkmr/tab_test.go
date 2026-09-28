@@ -103,3 +103,103 @@ func TestTabRefusesAPositionalArgument(t *testing.T) {
 		t.Errorf("stderr = %q, want a line explaining the refusal", stderr)
 	}
 }
+
+// hasControls reports whether s contains a character a terminal would act on.
+func hasControls(s string) bool {
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			return true
+		}
+	}
+	return false
+}
+
+// The same rule, shown closed at two different doors. A page controls its own
+// document.title, so a browser tab and a fetched page are both attacker-
+// influenced; --title is the user's own, but it is the third way in and the rule
+// has one owner, not three.
+//
+// The tab case also covers the picker: the title is cleaned when the choices are
+// built, before anything is displayed, so an ESC cannot reach the frame the
+// picker draws either.
+func TestATitleWithEscapesIsStrippedAtEveryDoor(t *testing.T) {
+	const nasty = "\x1b[2JCleared\x07\u009b31m"
+
+	t.Run("through bkmr tab", func(t *testing.T) {
+		newVaultForTest(t, "pw")
+		var shown []tabChoice
+		old := chooseTab
+		chooseTab = func(items []tabChoice) (tabChoice, bool, error) {
+			shown = items
+			return items[0], true, nil
+		}
+		defer func() { chooseTab = old }()
+		stubTabs(t, "https://nasty.example", nasty)
+
+		capture(t, func() {
+			if err := runTab(nil); err != nil {
+				t.Fatalf("runTab() error = %v", err)
+			}
+		})
+
+		if len(shown) != 1 {
+			t.Fatalf("chooseTab got %d choices, want 1", len(shown))
+		}
+		if hasControls(shown[0].Title) {
+			t.Errorf("the picker was handed %q, which still contains a control character", shown[0].Title)
+		}
+
+		v, _ := openVault()
+		c, _ := v.Load()
+		if len(c.Bookmarks) != 1 {
+			t.Fatalf("len(Bookmarks) = %d, want 1", len(c.Bookmarks))
+		}
+		if hasControls(c.Bookmarks[0].Title) {
+			t.Errorf("stored Title = %q, want no control characters", c.Bookmarks[0].Title)
+		}
+		if want := "[2JCleared31m"; c.Bookmarks[0].Title != want {
+			t.Errorf("stored Title = %q, want %q", c.Bookmarks[0].Title, want)
+		}
+	})
+
+	t.Run("through the --title flag", func(t *testing.T) {
+		newVaultForTest(t, "pw")
+
+		capture(t, func() {
+			if err := runAdd([]string{"--no-fetch", "--title", nasty, "https://nasty.example"}); err != nil {
+				t.Fatalf("runAdd() error = %v", err)
+			}
+		})
+
+		v, _ := openVault()
+		c, _ := v.Load()
+		if len(c.Bookmarks) != 1 {
+			t.Fatalf("len(Bookmarks) = %d, want 1", len(c.Bookmarks))
+		}
+		if hasControls(c.Bookmarks[0].Title) {
+			t.Errorf("stored Title = %q, want no control characters", c.Bookmarks[0].Title)
+		}
+		if want := "[2JCleared31m"; c.Bookmarks[0].Title != want {
+			t.Errorf("stored Title = %q, want %q", c.Bookmarks[0].Title, want)
+		}
+	})
+
+	t.Run("through the --note flag", func(t *testing.T) {
+		newVaultForTest(t, "pw")
+
+		capture(t, func() {
+			if err := runAdd([]string{"--no-fetch", "--note", nasty, "https://nasty.example"}); err != nil {
+				t.Fatalf("runAdd() error = %v", err)
+			}
+		})
+
+		v, _ := openVault()
+		c, _ := v.Load()
+		if len(c.Bookmarks) != 1 {
+			t.Fatalf("len(Bookmarks) = %d, want 1", len(c.Bookmarks))
+		}
+		if hasControls(c.Bookmarks[0].Notes) {
+			t.Errorf("stored Notes = %q, want no control characters", c.Bookmarks[0].Notes)
+		}
+	})
+}

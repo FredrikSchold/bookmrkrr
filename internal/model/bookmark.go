@@ -120,13 +120,18 @@ func allDigits(s string) bool {
 	return true
 }
 
-// NormalizeTags lowercases, hyphenates internal whitespace, removes blanks
-// and duplicates, and sorts the result.
+// NormalizeTags strips control characters, lowercases, hyphenates internal
+// whitespace, removes blanks and duplicates, and sorts the result.
+//
+// The dropControls call is not redundant with the Fields join below, which is
+// what it looks like. strings.Fields splits on unicode.IsSpace, and ESC, NUL,
+// BEL, DEL and CSI are not space: before this, a tag really could carry an
+// escape sequence into ls, into the picker, and into tag mode's own rows.
 func NormalizeTags(in []string) []string {
 	seen := make(map[string]bool, len(in))
 	out := make([]string, 0, len(in))
 	for _, t := range in {
-		t = strings.Join(strings.Fields(strings.ToLower(t)), "-")
+		t = strings.Join(strings.Fields(dropControls(strings.ToLower(t), false)), "-")
 		if t == "" || seen[t] {
 			continue
 		}
@@ -139,12 +144,18 @@ func NormalizeTags(in []string) []string {
 
 // Add stores a bookmark, or merges it into an existing entry with the same
 // normalized URL. The second return value reports whether a merge happened.
+//
+// Every title and note that enters the vault passes through here, so this is
+// where they are cleaned - once, before either branch below, so the merge path
+// cannot be the door the new-bookmark path is not. See isControl.
 func (c *Collection) Add(b Bookmark) (Bookmark, bool, error) {
 	key, err := NormalizeURL(b.URL)
 	if err != nil {
 		return Bookmark{}, false, err
 	}
 	b.Tags = NormalizeTags(b.Tags)
+	b.Title = CleanTitle(b.Title)
+	b.Notes = cleanNotes(b.Notes)
 
 	for i := range c.Bookmarks {
 		existing, err := NormalizeURL(c.Bookmarks[i].URL)
@@ -206,3 +217,78 @@ func (c *Collection) TagCounts() map[string]int {
 	}
 	return counts
 }
+
+// Control characters are stripped from every string this package stores, and
+// this is the only place that rule lives.
+//
+// Titles, notes and tags all end up printed straight to a terminal - by ls, by
+// the picker, by tag mode's rows, by the line each save reports - and none of
+// them is necessarily the user's own text. A page controls its own
+// document.title, so it controls what a fetched title and a captured browser tab
+// contain; Task 12's importer reads titles out of a file somebody else wrote. An
+// ESC in any of those is a terminal-injection vector: it can clear the screen,
+// move the cursor, recolour everything printed afterwards, or on some terminals
+// set the window title or push text back into the input buffer.
+//
+// The rule is the control ranges and nothing else. C0 (U+0000-U+001F) includes
+// ESC; DEL (U+007F) is honored by some terminals; and C1 (U+0080-U+009F) is
+// honored directly by others, which is why U+009B - CSI, a single-byte "ESC[" -
+// is stripped too.
+//
+// Ordinary Unicode is left entirely alone, deliberately. Right-to-left marks and
+// zero-width characters can make a title display confusingly, and they are also
+// legitimate text in real page titles: stripping them would corrupt the title of
+// every Arabic and Hebrew page on the web. Control characters are the line.
+//
+// This is also the owner of an invariant internal/tui only documented:
+// tui.clip must be handed text with no escape sequences in it, which until now
+// was enforced by convention.
+func isControl(r rune) bool {
+	return r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f)
+}
+
+// dropControls removes every control character. Tab, newline and carriage
+// return are the exception: they become the space they were standing in for, so
+// that removing one cannot jam two words together. A caller that wants real line
+// breaks kept - a note - passes keepLines, and then a CRLF becomes a plain LF
+// rather than leaving a stray carriage return behind.
+func dropControls(s string, keepLines bool) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '\n', '\t':
+			if keepLines {
+				return r
+			}
+			return ' '
+		case '\r':
+			if keepLines {
+				return -1
+			}
+			return ' '
+		}
+		if isControl(r) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+// CleanTitle makes one line of text safe to store and to print: control
+// characters go, and the whitespace that is left collapses to single spaces.
+//
+// It is exported for the two places that need the rule before Add can apply it.
+// The tab picker shows a browser-supplied title on screen before anything is
+// saved, so cleaning at storage time would be too late for the frame the picker
+// draws; and Find hands out a writable *Bookmark, so an editing path has to be
+// able to reach the same rule rather than inventing a second one. It is
+// idempotent, so applying it early costs nothing.
+func CleanTitle(s string) string {
+	return strings.Join(strings.Fields(dropControls(s, false)), " ")
+}
+
+// cleanNotes is CleanTitle's multi-line counterpart. Notes are the one field
+// that is legitimately more than one line - Add itself joins a merged note onto
+// an existing one with a newline - so line breaks and tabs survive and the
+// whitespace is not collapsed. It is unexported because nothing outside this
+// package writes a note without going through Add.
+func cleanNotes(s string) string { return dropControls(s, true) }
