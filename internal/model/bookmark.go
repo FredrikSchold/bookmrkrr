@@ -54,7 +54,29 @@ func NormalizeURL(raw string) (string, error) {
 	if raw == "" {
 		return "", fmt.Errorf("empty URL")
 	}
-	if strings.ContainsAny(raw, " \t\n") {
+	// A control character in a URL is refused, not cleaned. Every other string
+	// this package stores gets the characters stripped out of it, because a title
+	// with one fewer byte is still the same title - but a URL with one fewer byte
+	// points somewhere else, and where it points is the only thing a bookmark is
+	// for. Refusing also keeps such an entry out of the vault entirely, which is
+	// what an import wants: it counts what it skipped and says so.
+	//
+	// net/url already refuses C0 and DEL, so on its own this closes the C1 range
+	// - and C1 is the range that matters here. url.Parse accepts U+009B and
+	// u.String() percent-encodes it, so the *normalized* URL looks harmless; but
+	// what gets stored is the raw URL the user or the import file gave, and the
+	// raw URL is what ls prints and what label() prints for every titleless
+	// bookmark. U+009B is CSI, a single-byte "ESC[".
+	//
+	// %q, so the refusal cannot print the escape it is refusing: it renders a
+	// control character as an escape sequence spelled out in ASCII rather than
+	// sending it to the terminal.
+	if i := strings.IndexFunc(raw, isControl); i >= 0 {
+		return "", fmt.Errorf("URL contains a control character at byte %d: %q", i, raw)
+	}
+	// A space only. Tab and newline were the other two this used to test for, and
+	// they are control characters, so the check above has already refused them.
+	if strings.Contains(raw, " ") {
 		return "", fmt.Errorf("not a URL: %q", raw)
 	}
 	if !strings.Contains(raw, "://") {

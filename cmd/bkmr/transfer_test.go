@@ -191,11 +191,17 @@ func TestImportReadsBrowserBookmarksHTML(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	capture(t, func() {
+	_, stderr := bothStreams(t, func() {
 		if err := runImport([]string{path}); err != nil {
 			t.Fatalf("runImport() error = %v", err)
 		}
 	})
+	// Skipping is reported rather than silent: what bkmr will not store is
+	// decided in one place, model.NormalizeURL, and counted in one place,
+	// Collection.AddAll.
+	if !strings.Contains(stderr, "skipped 1") {
+		t.Errorf("stderr = %q, want the bookmarklet reported as skipped", stderr)
+	}
 
 	v, _ := openVault()
 	c, _ := v.Load()
@@ -271,5 +277,142 @@ func TestImportOfAnUnrecognizedFileFailsAndChangesNothing(t *testing.T) {
 	c, _ := v.Load()
 	if len(c.Bookmarks) != 1 {
 		t.Errorf("len(Bookmarks) = %d, want the vault untouched", len(c.Bookmarks))
+	}
+}
+
+// A URL is attacker-authored on exactly this path, and a stored URL reaches a
+// terminal raw - through ls, and through label() for every titleless bookmark,
+// which an HTML import produces for any anchor with no text. NormalizeURL
+// refuses a URL carrying a control character, so such an entry never enters the
+// vault at all, and AddAll counts it so the user is told.
+//
+// Three anchors, one storable. The second is the interesting one: "&#27;" is
+// pure ASCII in the file, and html.UnescapeString turns it into a real ESC, so a
+// plain-looking bookmark export can manufacture a control character out of
+// nothing. The third carries a literal C1 CSI, which is the spelling net/url
+// used to let through.
+func TestImportSkipsHTMLHrefsCarryingControlCharacters(t *testing.T) {
+	newVaultForTest(t, "pw")
+	path := filepath.Join(t.TempDir(), "bookmarks.html")
+	// U+009B is built from its code point rather than written as an escape. This
+	// project has already been bitten once by tooling that rewrote a \u escape in
+	// committed source into the control byte it denotes; string(rune(...)) cannot
+	// be misread that way, and it is unambiguous about what is intended.
+	csi := string(rune(0x9b))
+	body := "<!DOCTYPE NETSCAPE-Bookmark-file-1>\n<DL><p>\n" +
+		"  <DT><A HREF=\"https://fine.example/one\">Fine</A>\n" +
+		"  <DT><A HREF=\"https://evil.example/a&#27;[31mZ\"></A>\n" +
+		"  <DT><A HREF=\"https://evil.example/b" + csi + "2JZ\"></A>\n" +
+		"</DL>"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr := bothStreams(t, func() {
+		if err := runImport([]string{path}); err != nil {
+			t.Fatalf("runImport() error = %v", err)
+		}
+	})
+	if !strings.Contains(stdout, "imported 1 new") {
+		t.Errorf("stdout = %q, want one bookmark imported", stdout)
+	}
+	if !strings.Contains(stderr, "skipped 2") {
+		t.Errorf("stderr = %q, want two entries reported as skipped", stderr)
+	}
+
+	v, _ := openVault()
+	c, _ := v.Load()
+	if len(c.Bookmarks) != 1 {
+		t.Fatalf("len(Bookmarks) = %d, want 1", len(c.Bookmarks))
+	}
+	if got := c.Bookmarks[0].URL; got != "https://fine.example/one" {
+		t.Errorf("URL = %q, want only the clean one stored", got)
+	}
+}
+
+// The JSON half of the same threat: an exported vault somebody else edited. Also
+// the proof that refusing beats cleaning - no URL in the vault was quietly
+// rewritten to point somewhere else, because none of these was stored at all.
+func TestImportSkipsJSONURLsCarryingControlCharacters(t *testing.T) {
+	newVaultForTest(t, "pw")
+	path := filepath.Join(t.TempDir(), "in.json")
+	// esc is one backslash and a u; the four hex digits are appended below, so
+	// that this file never holds a complete JSON escape for a control character.
+	// The point of the fixture is that the *file* carries the escape and the
+	// decoded URL carries the control character - if the source were rewritten
+	// into a raw byte, encoding/json would reject the fixture outright and the
+	// test would be proving something else entirely.
+	esc := `\u`
+	body := `{"version":1,"bookmarks":[
+	  {"id":"a","url":"https://fine.example/one","added":"2026-01-01T00:00:00Z"},
+	  {"id":"b","url":"https://evil.example/a` + esc + `009b2JZ","added":"2026-01-02T00:00:00Z"},
+	  {"id":"c","url":"https://evil.example/b` + esc + `001b[31mZ","added":"2026-01-03T00:00:00Z"}
+	]}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr := bothStreams(t, func() {
+		if err := runImport([]string{path}); err != nil {
+			t.Fatalf("runImport() error = %v", err)
+		}
+	})
+	if !strings.Contains(stdout, "imported 1 new") {
+		t.Errorf("stdout = %q, want one bookmark imported", stdout)
+	}
+	if !strings.Contains(stderr, "skipped 2") {
+		t.Errorf("stderr = %q, want two entries reported as skipped", stderr)
+	}
+
+	v, _ := openVault()
+	c, _ := v.Load()
+	if len(c.Bookmarks) != 1 || c.Bookmarks[0].URL != "https://fine.example/one" {
+		t.Fatalf("Bookmarks = %+v, want only the clean one", c.Bookmarks)
+	}
+	for _, b := range c.Bookmarks {
+		for _, r := range b.URL {
+			if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+				t.Errorf("URL = %q still contains U+%04X", b.URL, r)
+			}
+		}
+	}
+}
+
+// os.WriteFile sets a mode only when it creates the file, so exporting over an
+// existing dump.json left a world-readable file world-readable and filled it
+// with every URL, title and note in the clear. O_EXCL refuses instead: for a
+// plaintext copy of an encrypted vault, not overwriting is the right default,
+// and it also saves an unrelated file from a typo.
+func TestExportRefusesToOverwriteAnExistingFile(t *testing.T) {
+	newVaultForTest(t, "pw")
+	capture(t, func() { runAdd([]string{"--no-fetch", "https://secret.example"}) })
+
+	path := filepath.Join(t.TempDir(), "dump.json")
+	const existing = "a file that was already here\n"
+	if err := os.WriteFile(path, []byte(existing), 0o666); err != nil {
+		t.Fatal(err)
+	}
+
+	var err error
+	stdout, _ := bothStreams(t, func() { err = runExport([]string{path}) })
+	if err == nil {
+		t.Fatal("runExport() error = nil, want a refusal to overwrite")
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("error = %v, want it to name the path", err)
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want nothing", stdout)
+	}
+
+	data, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(data) != existing {
+		t.Errorf("file = %q, want it untouched", data)
+	}
+	if strings.Contains(string(data), "secret.example") {
+		t.Error("the refused export wrote the vault into the existing file")
 	}
 }

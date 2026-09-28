@@ -51,6 +51,49 @@ func TestNormalizeURLRejectsNonURLs(t *testing.T) {
 	}
 }
 
+// A URL is not prose, so a control character in one is refused rather than
+// cleaned: dropping bytes out of a URL would silently change where it points,
+// and where a link points is the one thing a bookmark is for.
+//
+// net/url already refuses C0 and DEL, so those cases are regression cover. C1 is
+// the gap this closes: url.Parse accepts U+009B, and NormalizeURL returns
+// u.String(), which percent-encodes it - but what gets *stored* is the raw URL
+// the file or the user gave, and the raw URL is what ls prints. U+009B is CSI, a
+// single-byte "ESC[", so a stored URL carrying one is a terminal escape in every
+// row that prints it.
+func TestNormalizeURLRejectsControlCharacters(t *testing.T) {
+	// Built from the code point rather than written as an escape: this project
+	// has been bitten once by tooling that rewrote a \u escape in committed
+	// source into the control byte it denotes, and string(rune(...)) cannot be
+	// misread that way.
+	csi := string(rune(0x9b))
+	for _, tt := range []struct{ name, in string }{
+		{"ESC in the path", "https://evil.example/a\x1b[31mZ"},
+		{"NUL in the path", "https://evil.example/a\x00b"},
+		{"DEL in the path", "https://evil.example/a\x7fb"},
+		{"C1 CSI in the path", "https://evil.example/a" + csi + "2JZ"},
+		{"C1 CSI in the query", "https://evil.example/a?q=" + csi + "2J"},
+		{"C1 CSI in the host", "https://evil" + csi + ".example/a"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got, err := NormalizeURL(tt.in); err == nil {
+				t.Errorf("NormalizeURL(%q) = %q, want an error", tt.in, got)
+			}
+		})
+	}
+}
+
+// The counterpart, for the same reason NormalizeTags leaves ordinary Unicode
+// alone. "&#155;" in an imported HTML file decodes to U+203A, not to U+009B -
+// Go's html package applies HTML5's Windows-1252 replacement table to numeric
+// references in that range - and U+203A is an ordinary printable character that
+// has no business being refused.
+func TestNormalizeURLKeepsOrdinaryUnicode(t *testing.T) {
+	if _, err := NormalizeURL("https://example.com/a" + string(rune(0x203a)) + "b"); err != nil {
+		t.Errorf("NormalizeURL() error = %v, want a printable non-ASCII path accepted", err)
+	}
+}
+
 func TestNormalizeTags(t *testing.T) {
 	got := NormalizeTags([]string{" Rust ", "rust", "Go Lang", "", "  ", "Web/Dev"})
 	want := []string{"go-lang", "rust", "web/dev"}
@@ -417,12 +460,22 @@ func TestCleanNormalizesEveryStoredString(t *testing.T) {
 }
 
 func TestCleanIsIdempotent(t *testing.T) {
-	c := Collection{Bookmarks: []Bookmark{{Title: "A \x1b B", Notes: "n\x00o", Tags: []string{"T"}}}}
+	c := Collection{Bookmarks: []Bookmark{{Title: "A \x1b B", Notes: "n\x00o", Tags: []string{"T", " two words ", "t"}}}}
 	c.Clean()
 	first := c.Bookmarks[0]
+	firstTags := strings.Join(first.Tags, ",")
 	c.Clean()
 	if c.Bookmarks[0].Title != first.Title || c.Bookmarks[0].Notes != first.Notes {
 		t.Errorf("Clean() twice = %+v, want %+v", c.Bookmarks[0], first)
+	}
+	// Tags are the field whose idempotence is least obvious: Clean lowercases,
+	// hyphenates, deduplicates and sorts them, so a second pass has the most it
+	// could get wrong.
+	if got := strings.Join(c.Bookmarks[0].Tags, ","); got != firstTags {
+		t.Errorf("Clean() twice Tags = %q, want %q", got, firstTags)
+	}
+	if firstTags != "t,two-words" {
+		t.Errorf("Clean() Tags = %q, want %q", firstTags, "t,two-words")
 	}
 }
 

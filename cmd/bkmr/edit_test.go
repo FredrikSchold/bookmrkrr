@@ -205,3 +205,58 @@ func TestRmUnknownIDFailsWithoutAskingOrWriting(t *testing.T) {
 		t.Errorf("len(Bookmarks) = %d, want the vault untouched", len(c.Bookmarks))
 	}
 }
+
+// An id is required, and both commands reach their arity check with zero
+// positionals as easily as with two - 'bkmr edit --title x' is a plausible typo.
+func TestEditWithNoIDIsAUsageError(t *testing.T) {
+	newVaultForTest(t, "pw")
+	capture(t, func() { runAdd([]string{"--no-fetch", "--title", "Keep", "https://a.example"}) })
+
+	var err error
+	stdout, stderr := bothStreams(t, func() { err = runEdit([]string{"--title", "x"}) })
+	if err != errUsage {
+		t.Errorf("runEdit() error = %v, want the bare errUsage sentinel", err)
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want nothing", stdout)
+	}
+	if !strings.Contains(stderr, "one bookmark id") {
+		t.Errorf("stderr = %q, want it to say an id is required", stderr)
+	}
+
+	v, _ := openVault()
+	c, _ := v.Load()
+	if c.Bookmarks[0].Title != "Keep" {
+		t.Errorf("Title = %q, want it untouched", c.Bookmarks[0].Title)
+	}
+}
+
+func TestRmWithNoIDIsAUsageError(t *testing.T) {
+	newVaultForTest(t, "pw")
+	capture(t, func() { runAdd([]string{"--no-fetch", "https://a.example"}) })
+
+	old := confirm
+	confirm = func(string) (bool, error) {
+		t.Fatal("a usage error must not reach the confirmation")
+		return false, nil
+	}
+	defer func() { confirm = old }()
+
+	var err error
+	stdout, stderr := bothStreams(t, func() { err = runRm([]string{"--force"}) })
+	if err != errUsage {
+		t.Errorf("runRm() error = %v, want the bare errUsage sentinel", err)
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want nothing", stdout)
+	}
+	if !strings.Contains(stderr, "one bookmark id") {
+		t.Errorf("stderr = %q, want it to say an id is required", stderr)
+	}
+
+	v, _ := openVault()
+	c, _ := v.Load()
+	if len(c.Bookmarks) != 1 {
+		t.Errorf("len(Bookmarks) = %d, want the vault untouched", len(c.Bookmarks))
+	}
+}

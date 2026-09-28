@@ -312,3 +312,22 @@ func TestAControlCharacterInATabURLNeverReachesTheRow(t *testing.T) {
 		t.Errorf("row URL = %q, want %q", shown[0].URL, want)
 	}
 }
+
+// The same refusal with the URL after a flag. Permuting the arguments means a
+// positional is now found wherever it appears, so the refusal has to hold there
+// too - before this, 'bkmr tab --note x https://...' reached the same check by a
+// different route, and nothing pinned it.
+func TestTabRefusesAPositionalArgumentAfterAFlag(t *testing.T) {
+	newVaultForTest(t, "pw")
+	stubNoBrowser(t)
+
+	var err error
+	stderr := captureErr(t, func() { err = runTab([]string{"--note", "n", "https://example.com"}) })
+
+	if !errors.Is(err, errUsage) {
+		t.Fatalf("runTab() error = %v, want errUsage", err)
+	}
+	if !strings.Contains(stderr, "takes no arguments") {
+		t.Errorf("stderr = %q, want a line explaining the refusal", stderr)
+	}
+}

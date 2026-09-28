@@ -58,17 +58,48 @@ func runExport(args []string) error {
 		_, err := out.Write(data)
 		return err
 	}
-	// 0o600: owner only. The vault itself is written with the same mode, and an
-	// unencrypted copy of it has no business being more readable than the
-	// original. On Windows this is not recorded by the filesystem, which is one
-	// more reason the warning below is not optional.
-	if err := os.WriteFile(args[0], data, 0o600); err != nil {
+	if err := writeNewFile(args[0], data); err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "wrote %d bookmarks to %s\n", len(c.Bookmarks), args[0])
 	// Last, so it is the line still on screen when the command finishes.
 	fmt.Fprintln(errOut, plaintextWarning)
 	fmt.Fprintf(errOut, "bkmr: delete %s when you are done with it\n", args[0])
+	return nil
+}
+
+// writeNewFile writes data to a file it creates, at 0o600, and refuses to
+// overwrite anything already there.
+//
+// os.WriteFile would have been one line, but it sets a mode only when it creates
+// the file: exporting over an existing world-readable dump.json would have left
+// it world-readable and filled it with every URL, title and note in the clear.
+// O_EXCL makes the refusal the same syscall as the create, so there is no gap in
+// which the file could appear - the same reasoning as store.Create.
+//
+// Refusing rather than overwriting is also the right default on its own terms.
+// This is a plaintext copy of an encrypted vault; a typo that names an unrelated
+// file should not destroy it, and a little friction belongs on the one operation
+// this tool is loudest about.
+func writeNewFile(path string, data []byte) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		if os.IsExist(err) {
+			return fmt.Errorf("%s already exists - remove it or choose another path; bkmr will not overwrite a file with a plaintext export", path)
+		}
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		// A half-written plaintext export is the worst of both outcomes: it is
+		// not a usable export and it is still a file full of bookmarks.
+		os.Remove(path)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(path)
+		return err
+	}
 	return nil
 }
 
@@ -117,7 +148,7 @@ func runImport(args []string) error {
 	if skipped > 0 {
 		// Dropping part of what somebody asked to import without saying so is
 		// not acceptable, and it is a diagnostic rather than output.
-		fmt.Fprintf(errOut, "bkmr: skipped %d entries whose URL was not http or https\n", skipped)
+		fmt.Fprintf(errOut, "bkmr: skipped %d entries whose URL bkmr will not store\n", skipped)
 	}
 	return nil
 }
@@ -142,10 +173,11 @@ func parseImport(data []byte) ([]model.Bookmark, error) {
 
 	var found []model.Bookmark
 	for _, m := range hrefPattern.FindAllStringSubmatch(trimmed, -1) {
+		// Every anchor is returned, bookmarklets and place: URLs included.
+		// Whether a URL is one bkmr will store is model.NormalizeURL's decision
+		// and nobody else's, and AddAll is where it gets made and counted - so a
+		// skipped entry is reported to the user instead of vanishing here.
 		href := html.UnescapeString(m[1])
-		if _, err := model.NormalizeURL(href); err != nil {
-			continue // skip bookmarklets, place: URLs, and other non-http entries
-		}
 		title := strings.Join(strings.Fields(html.UnescapeString(stripTags(m[2]))), " ")
 		found = append(found, model.Bookmark{URL: href, Title: title})
 	}
