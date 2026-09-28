@@ -90,7 +90,11 @@ func runTab(args []string) error {
 	fs.Var(&tags, "t", "tag (repeatable)")
 	fs.Var(&tags, "tag", "tag (repeatable)")
 	note := fs.String("note", "", "note")
-	if err := fs.Parse(args); err != nil {
+	// parsePermuted for one shape of argument handling across the CLI; see
+	// main.go. tab takes no positional argument, but it does refuse one, and it
+	// has to refuse a URL typed after --note as surely as one typed before it.
+	rest, err := parsePermuted(fs, args)
+	if err != nil {
 		// Per the errUsage contract: say what was wrong here, then return the
 		// sentinel bare so dispatch prints the usage line and exits 2.
 		fmt.Fprintf(errOut, "bkmr: %v\n", err)
@@ -99,7 +103,7 @@ func runTab(args []string) error {
 	// Refused rather than ignored. Somebody who types 'bkmr tab https://...'
 	// expecting 'bkmr add' would otherwise have the URL silently dropped and
 	// whichever tab they then picked saved in its place.
-	if fs.NArg() > 0 {
+	if len(rest) > 0 {
 		fmt.Fprintln(errOut, "bkmr: tab takes no arguments - it saves a tab you pick from the list")
 		return errUsage
 	}

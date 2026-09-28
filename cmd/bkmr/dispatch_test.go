@@ -126,3 +126,162 @@ func TestHelpFlagOnAnUnknownCommandStillFails(t *testing.T) {
 		t.Errorf("stderr = %q, want it to name the unknown command", stderr)
 	}
 }
+
+// Flag permutation. Go's flag package stops parsing at the first non-flag word,
+// so without parsePermuted every one of these is a usage error - including
+// 'bkmr add <url> -t rust', which is the tool's primary command in the form
+// almost everybody types it. These go through dispatch rather than calling the
+// run functions directly, so the real argument path is what is under test.
+
+func TestAddAcceptsFlagsAfterTheURL(t *testing.T) {
+	newVaultForTest(t, "pw")
+
+	capture(t, func() {
+		if code := dispatch([]string{"add", "https://a.example", "-t", "rust", "--title", "Rust", "--note", "a note", "--no-fetch"}); code != 0 {
+			t.Fatalf("dispatch(add) = %d, want 0", code)
+		}
+	})
+
+	got := bookmarksInVault(t)
+	if len(got) != 1 {
+		t.Fatalf("len(Bookmarks) = %d, want 1", len(got))
+	}
+	if got[0].URL != "https://a.example" {
+		t.Errorf("URL = %q, want %q", got[0].URL, "https://a.example")
+	}
+	if strings.Join(got[0].Tags, ",") != "rust" {
+		t.Errorf("Tags = %v, want [rust] - a tag after the URL must still be a tag", got[0].Tags)
+	}
+	if got[0].Title != "Rust" {
+		t.Errorf("Title = %q, want %q", got[0].Title, "Rust")
+	}
+	if got[0].Notes != "a note" {
+		t.Errorf("Notes = %q, want %q", got[0].Notes, "a note")
+	}
+}
+
+func TestAddStillAcceptsFlagsBeforeTheURL(t *testing.T) {
+	newVaultForTest(t, "pw")
+
+	capture(t, func() {
+		if code := dispatch([]string{"add", "--no-fetch", "-t", "rust", "https://a.example"}); code != 0 {
+			t.Fatalf("dispatch(add) = %d, want 0", code)
+		}
+	})
+
+	got := bookmarksInVault(t)
+	if len(got) != 1 || strings.Join(got[0].Tags, ",") != "rust" {
+		t.Errorf("Bookmarks = %+v, want one bookmark tagged rust", got)
+	}
+}
+
+// The permuting parser must not turn a flag's value into a positional argument.
+// If it did, this add would look like two URLs and be refused - and a naive
+// "collect everything that does not start with a dash" implementation does
+// exactly that.
+func TestAddDoesNotMistakeAFlagValueForTheURL(t *testing.T) {
+	newVaultForTest(t, "pw")
+
+	capture(t, func() {
+		if code := dispatch([]string{"add", "--no-fetch", "--title", "https://not-a-url", "https://real.example"}); code != 0 {
+			t.Fatalf("dispatch(add) = %d, want 0", code)
+		}
+	})
+
+	got := bookmarksInVault(t)
+	if len(got) != 1 {
+		t.Fatalf("len(Bookmarks) = %d, want 1", len(got))
+	}
+	if got[0].URL != "https://real.example" {
+		t.Errorf("URL = %q, want %q - the --title value is not the URL", got[0].URL, "https://real.example")
+	}
+	if got[0].Title != "https://not-a-url" {
+		t.Errorf("Title = %q, want %q", got[0].Title, "https://not-a-url")
+	}
+}
+
+// Permuting must not cost add its arity check: two URLs is still a mistake, and
+// still one that saves nothing.
+func TestAddStillRefusesTwoURLsWithFlagsBetweenThem(t *testing.T) {
+	newVaultForTest(t, "pw")
+
+	stdout, stderr := bothStreams(t, func() {
+		if code := dispatch([]string{"add", "--no-fetch", "https://a.example", "-t", "rust", "https://b.example"}); code != 2 {
+			t.Errorf("dispatch(add) = %d, want 2", code)
+		}
+	})
+
+	if stdout != "" {
+		t.Errorf("stdout = %q, want nothing", stdout)
+	}
+	if !strings.Contains(stderr, "at most one URL") {
+		t.Errorf("stderr = %q, want it to explain that add takes at most one URL", stderr)
+	}
+	if got := bookmarksInVault(t); len(got) != 0 {
+		t.Errorf("len(Bookmarks) = %d, want 0 - a usage error must save nothing", len(got))
+	}
+}
+
+func TestEditTakesItsIDBeforeOrAfterTheFlags(t *testing.T) {
+	newVaultForTest(t, "pw")
+	addForTest(t, "--no-fetch", "https://a.example")
+	id := bookmarksInVault(t)[0].ID
+
+	capture(t, func() {
+		if code := dispatch([]string{"edit", id, "--title", "Trailing"}); code != 0 {
+			t.Fatalf("dispatch(edit <id> --title) = %d, want 0", code)
+		}
+	})
+	if got := bookmarksInVault(t)[0].Title; got != "Trailing" {
+		t.Errorf("Title = %q, want %q", got, "Trailing")
+	}
+
+	capture(t, func() {
+		if code := dispatch([]string{"edit", "--title", "Leading", id}); code != 0 {
+			t.Fatalf("dispatch(edit --title <id>) = %d, want 0", code)
+		}
+	})
+	if got := bookmarksInVault(t)[0].Title; got != "Leading" {
+		t.Errorf("Title = %q, want %q - both argument orders must mean the same thing", got, "Leading")
+	}
+}
+
+func TestEditStillRefusesTwoIDs(t *testing.T) {
+	newVaultForTest(t, "pw")
+	addForTest(t, "--no-fetch", "--title", "Keep", "https://a.example")
+	id := bookmarksInVault(t)[0].ID
+
+	_, stderr := bothStreams(t, func() {
+		if code := dispatch([]string{"edit", id, "--title", "x", id}); code != 2 {
+			t.Errorf("dispatch(edit) = %d, want 2", code)
+		}
+	})
+	if !strings.Contains(stderr, "one bookmark id") {
+		t.Errorf("stderr = %q, want it to explain that edit takes one id", stderr)
+	}
+	if got := bookmarksInVault(t)[0].Title; got != "Keep" {
+		t.Errorf("Title = %q, want it untouched by a usage error", got)
+	}
+}
+
+func TestRmAcceptsForceAfterTheID(t *testing.T) {
+	newVaultForTest(t, "pw")
+	addForTest(t, "--no-fetch", "https://a.example")
+	id := bookmarksInVault(t)[0].ID
+
+	old := confirm
+	confirm = func(string) (bool, error) {
+		t.Fatal("--force must not ask, wherever it appears")
+		return false, nil
+	}
+	defer func() { confirm = old }()
+
+	capture(t, func() {
+		if code := dispatch([]string{"rm", id, "--force"}); code != 0 {
+			t.Fatalf("dispatch(rm <id> --force) = %d, want 0", code)
+		}
+	})
+	if got := bookmarksInVault(t); len(got) != 0 {
+		t.Errorf("len(Bookmarks) = %d, want 0", len(got))
+	}
+}

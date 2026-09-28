@@ -36,9 +36,8 @@ func init() {
 	register(command{
 		Name:    "rm",
 		Summary: "delete a bookmark",
-		// Flags first: see the note on edit's usage line.
-		Usage: "bkmr rm [--force] <id>",
-		Run:   runRm,
+		Usage:   "bkmr rm <id> [--force]",
+		Run:     runRm,
 	})
 }
 
@@ -46,15 +45,17 @@ func runRm(args []string) error {
 	fs := flag.NewFlagSet("rm", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	force := fs.Bool("force", false, "delete without confirming")
-	if err := fs.Parse(args); err != nil {
+	// parsePermuted so '--force' can come before or after the id; see main.go.
+	rest, err := parsePermuted(fs, args)
+	if err != nil {
 		fmt.Fprintf(errOut, "bkmr: %v\n", err)
 		return errUsage
 	}
-	if fs.NArg() != 1 {
-		fmt.Fprintln(errOut, "bkmr: rm takes exactly one bookmark id, after the flags")
+	if len(rest) != 1 {
+		fmt.Fprintln(errOut, "bkmr: rm takes exactly one bookmark id")
 		return errUsage
 	}
-	id := fs.Arg(0)
+	id := rest[0]
 
 	v, err := openVault()
 	if err != nil {

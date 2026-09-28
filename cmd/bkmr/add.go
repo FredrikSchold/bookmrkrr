@@ -51,23 +51,26 @@ func runAdd(args []string) error {
 	title := fs.String("title", "", "title")
 	note := fs.String("note", "", "note")
 	noFetch := fs.Bool("no-fetch", false, "do not fetch the page title")
-	if err := fs.Parse(args); err != nil {
+	// parsePermuted, not fs.Parse: 'bkmr add https://x -t rust' is the primary
+	// command in the form almost everybody types it, and stdlib flag stops at
+	// the URL and calls the rest a second one.
+	rest, err := parsePermuted(fs, args)
+	if err != nil {
 		// Per the errUsage contract: say what was wrong here, then return the
 		// sentinel bare so dispatch prints the usage line and exits 2.
 		fmt.Fprintf(errOut, "bkmr: %v\n", err)
 		return errUsage
 	}
-	if fs.NArg() > 1 {
+	if len(rest) > 1 {
 		fmt.Fprintln(errOut, "bkmr: add takes at most one URL")
 		return errUsage
 	}
 
 	raw := ""
 	fromClipboard := false
-	if fs.NArg() == 1 {
-		raw = fs.Arg(0)
+	if len(rest) == 1 {
+		raw = rest[0]
 	} else {
-		var err error
 		raw, err = readClipboard()
 		if err != nil {
 			return fmt.Errorf("read clipboard: %w", err)

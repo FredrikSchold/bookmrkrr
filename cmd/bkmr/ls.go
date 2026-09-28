@@ -31,7 +31,10 @@ func runLs(args []string) error {
 	fs := flag.NewFlagSet("ls", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	tag := fs.String("tag", "", "only bookmarks carrying this tag")
-	if err := fs.Parse(args); err != nil {
+	// parsePermuted for one shape of argument handling across the CLI; see
+	// main.go. ls has no positional argument of its own, so nothing is done with
+	// what comes back: a stray word is ignored, exactly as it was before.
+	if _, err := parsePermuted(fs, args); err != nil {
 		fmt.Fprintf(errOut, "bkmr: %v\n", err)
 		return errUsage
 	}

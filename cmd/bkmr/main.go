@@ -4,6 +4,7 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -87,6 +88,42 @@ func dispatch(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// parsePermuted parses fs and returns the positional arguments, letting flags
+// appear before or after them. It returns the flag package's own error
+// unchanged, so a caller keeps reporting it the way it always did.
+//
+// stdlib flag does not permute: it stops at the first word that is not a flag
+// and leaves the rest in fs.Args(). That made 'bkmr add https://x -t rust' - the
+// primary command in the form almost everybody types it - a usage error
+// complaining about two URLs, while the usage line advertised exactly that
+// order. Documenting flags-first instead would have been recording the defect,
+// and no other modern CLI demands it.
+//
+// It parses repeatedly rather than sorting the arguments itself, so that flag
+// keeps deciding what a flag's value is. A hand-rolled "anything without a
+// leading dash is positional" split gets 'add --title https://not-a-url
+// https://real.example' wrong, and gets it wrong by silently bookmarking the
+// wrong URL; there is a test for that.
+//
+// One deliberate limit: a "--" terminator only ends flag parsing for the pass it
+// appears in, so a second dash-leading word after it would be read as a flag on
+// the next pass. Nothing bkmr takes positionally - a URL, a bookmark id - can
+// begin with a dash, so this has no practical reach.
+func parsePermuted(fs *flag.FlagSet, args []string) ([]string, error) {
+	var positional []string
+	rest := args
+	for {
+		if err := fs.Parse(rest); err != nil {
+			return nil, err
+		}
+		if fs.NArg() == 0 {
+			return positional, nil
+		}
+		positional = append(positional, fs.Arg(0))
+		rest = fs.Args()[1:]
+	}
 }
 
 // errUsage makes a command print its usage line and exit 2.

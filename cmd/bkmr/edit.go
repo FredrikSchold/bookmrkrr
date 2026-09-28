@@ -12,12 +12,8 @@ func init() {
 	register(command{
 		Name:    "edit",
 		Summary: "change a bookmark's title, note or tags",
-		// The id comes last, after the flags. Go's flag package stops parsing
-		// at the first non-flag argument, so the flags genuinely have to be
-		// first, and a usage line that said otherwise would be advice that does
-		// not work.
-		Usage: "bkmr edit [--title text] [--note text] [-t tag]... <id>",
-		Run:   runEdit,
+		Usage:   "bkmr edit <id> [--title text] [--note text] [-t tag]...",
+		Run:     runEdit,
 	})
 }
 
@@ -29,15 +25,17 @@ func runEdit(args []string) error {
 	fs.Var(&tags, "tag", "replacement tag (repeatable)")
 	title := fs.String("title", "", "new title")
 	note := fs.String("note", "", "new note")
-	if err := fs.Parse(args); err != nil {
+	// parsePermuted so the id can come before or after the flags; see main.go.
+	rest, err := parsePermuted(fs, args)
+	if err != nil {
 		fmt.Fprintf(errOut, "bkmr: %v\n", err)
 		return errUsage
 	}
-	if fs.NArg() != 1 {
-		fmt.Fprintln(errOut, "bkmr: edit takes exactly one bookmark id, after the flags")
+	if len(rest) != 1 {
+		fmt.Fprintln(errOut, "bkmr: edit takes exactly one bookmark id")
 		return errUsage
 	}
-	id := fs.Arg(0)
+	id := rest[0]
 
 	// Distinguish "flag absent" from "flag set to empty". Clearing a title with
 	// --title "" has to be possible, so the zero value cannot mean "leave it".
@@ -61,6 +59,7 @@ func runEdit(args []string) error {
 	if err != nil {
 		return err
 	}
+
 	var updated model.Bookmark
 	if err := v.Mutate(func(c *model.Collection) error {
 		b, ok := c.Find(id)
