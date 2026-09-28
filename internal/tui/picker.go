@@ -27,6 +27,77 @@ const (
 	ActionDelete
 )
 
+// Features is the set of things a picker lets the user do. A caller declares
+// the set once and both Update and the help line read that one declaration, so
+// a key the caller cannot act on is neither accepted nor advertised.
+//
+// Task 10 left this open deliberately: the help line was a hard-coded string
+// while Update decided what to accept from the mode it was in, and
+// parameterizing only the wording would have let the two disagree. The first
+// caller that needs a reduced set is Task 11's tab picker - picking a tab means
+// "choose this one", so copy, delete and tag browsing are all meaningless
+// there, and tabs carry no tags for tag mode to list.
+//
+// A set rather than a Feature-per-field struct because the members are
+// independent, unordered, and only ever tested for membership; and a bitmask
+// rather than a map because Model is copied by value on every Update and a map
+// would be shared between those copies.
+type Features uint
+
+const (
+	// FeatureOpen is enter: choose the highlighted row (ActionOpen).
+	FeatureOpen Features = 1 << iota
+	// FeatureCopy is ctrl+y (ActionCopy).
+	FeatureCopy
+	// FeatureDelete is ctrl+d (ActionDelete).
+	FeatureDelete
+	// FeatureTags is tab: browse the tags and filter by one. It is a mode the
+	// picker handles itself rather than an Action it hands back, which is why
+	// it is a Feature and not an Action.
+	FeatureTags
+)
+
+// AllFeatures is what New gives a picker, so the common caller needs no
+// ceremony and every picker written before this existed behaves as it did.
+const AllFeatures = FeatureOpen | FeatureCopy | FeatureDelete | FeatureTags
+
+// featureHelp is the help line, in display order. Nothing else may word these:
+// View renders the line by filtering this table through Supports, which is the
+// same set Update consults, so the line cannot name a key that does nothing.
+//
+// "choose" rather than "open", because enter does not open anything in a tab
+// picker - it picks the tab to save. It is the one word that is honest for
+// every caller, and it is already this package's own name for what enter does
+// (see Chosen).
+// rowOnly marks a feature that needs the highlighted row to be one of the
+// caller's own items, so it is not advertised in tag mode, where the rows are
+// tags. Enter is not one of them: in tag mode it chooses the highlighted tag,
+// which is still choosing. Tab is not either - it leaves tag mode.
+var featureHelp = []struct {
+	feature Features
+	text    string
+	rowOnly bool
+}{
+	{FeatureOpen, "enter choose", false},
+	{FeatureTags, "tab tags", false},
+	{FeatureCopy, "ctrl+y copy", true},
+	{FeatureDelete, "ctrl+d delete", true},
+}
+
+// featureFor is the action-to-feature mapping act needs. ActionNone maps to no
+// feature, so quitting can never be switched off.
+func featureFor(a Action) Features {
+	switch a {
+	case ActionOpen:
+		return FeatureOpen
+	case ActionCopy:
+		return FeatureCopy
+	case ActionDelete:
+		return FeatureDelete
+	}
+	return 0
+}
+
 // Item is one row. Filter is the haystack fuzzy matching runs against, and
 // Tags feeds tag mode.
 type Item struct {
@@ -74,6 +145,9 @@ type Model struct {
 	emptyMessage string
 	tagNoun      string
 
+	// features is what this picker's caller can act on. See Features.
+	features Features
+
 	tagMode   bool
 	activeTag string
 	tagRows   []Item
@@ -94,6 +168,8 @@ func New(items []Item, prompt string) Model {
 		// was written for and the common case should need no ceremony.
 		emptyMessage: "no bookmarks yet - add one with 'bkmr add <url>'",
 		tagNoun:      "bookmarks",
+		// Everything, so a caller that says nothing gets the full picker.
+		features: AllFeatures,
 	}
 	m.buildTagRows()
 	m.refilter()
@@ -114,6 +190,18 @@ func (m Model) WithTagNoun(noun string) Model {
 	m.refilter()
 	return m
 }
+
+// WithFeatures replaces the set of things this picker supports. It is a
+// replacement rather than an addition: a caller that lists what it can do is
+// stating the whole of it, and a picker that quietly kept a default it was not
+// told to keep is how the help line and the behaviour drift apart again.
+func (m Model) WithFeatures(f Features) Model {
+	m.features = f
+	return m
+}
+
+// Supports reports whether every feature in f is supported.
+func (m Model) Supports(f Features) bool { return m.features&f == f }
 
 // Init satisfies tea.Model.
 func (m Model) Init() tea.Cmd { return textinput.Blink }
@@ -206,6 +294,23 @@ func (m *Model) refilter() {
 	}
 }
 
+// act finishes with a, or does nothing at all.
+//
+// Two checks, not one. The feature set answers "can this caller act on a row
+// this way", which is what stops a tab picker being handed ActionCopy. The mode
+// answers "is the highlighted row one of the caller's items at all", which the
+// feature set cannot: the bookmark picker supports copy and delete and still
+// must not fire either on a tag row. Task 10 shipped that regression once -
+// ctrl+y put a tag row's "2 bookmarks" count on the clipboard and reported it
+// as a success - so both stay.
+func (m Model) act(a Action) (tea.Model, tea.Cmd) {
+	f := featureFor(a)
+	if f == 0 || !m.Supports(f) || m.tagMode {
+		return m, nil
+	}
+	return m.finish(a)
+}
+
 func (m Model) finish(a Action) (tea.Model, tea.Cmd) {
 	if a != ActionNone && m.cursor < len(m.visible) {
 		m.chosen = m.visible[m.cursor]
@@ -237,6 +342,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m.finish(ActionNone)
 		case tea.KeyTab:
+			if !m.Supports(FeatureTags) {
+				return m, nil
+			}
 			if m.activeTag != "" {
 				m.activeTag = ""
 			} else {
@@ -247,6 +355,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refilter()
 			return m, nil
 		case tea.KeyEnter:
+			// In tag mode enter commits the highlighted tag as a filter. That
+			// belongs to FeatureTags, not to FeatureOpen, and it is only
+			// reachable at all when FeatureTags let the picker into tag mode.
 			if m.tagMode {
 				if m.cursor < len(m.visible) {
 					m.activeTag = m.visible[m.cursor].ID
@@ -257,24 +368,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
-			return m.finish(ActionOpen)
+			return m.act(ActionOpen)
 		case tea.KeyCtrlY:
-			// Guarded like Enter above: in tag mode the highlighted row is a
-			// tag, not a bookmark, so copying or deleting it is meaningless.
-			// Letting one through handed the caller Item{ID: "rust", Detail:
-			// "2 bookmarks"}, which the copy path cheerfully put on the
-			// clipboard and reported as a success. Both keys are guarded even
-			// though delete happens to fail cleanly on its own: the asymmetry
-			// is exactly the kind of thing that decays.
-			if m.tagMode {
-				return m, nil
-			}
-			return m.finish(ActionCopy)
+			return m.act(ActionCopy)
 		case tea.KeyCtrlD:
-			if m.tagMode {
-				return m, nil
-			}
-			return m.finish(ActionDelete)
+			return m.act(ActionDelete)
 		case tea.KeyUp, tea.KeyCtrlP:
 			if m.cursor > 0 {
 				m.cursor--
@@ -336,8 +434,27 @@ func (m Model) View() string {
 	if len(m.visible) == 0 {
 		b.WriteString("no matches\n")
 	}
-	b.WriteString(styleHelp("enter open · tab tags · ctrl+y copy · ctrl+d delete · esc quit"))
+	b.WriteString(styleHelp(m.helpLine()))
 	return b.String()
+}
+
+// helpLine advertises exactly the features this picker supports, and nothing
+// else. Esc is not in the table: quitting is always available, so there is no
+// state in which naming it would be a lie.
+func (m Model) helpLine() string {
+	parts := make([]string, 0, len(featureHelp)+1)
+	for _, fh := range featureHelp {
+		if fh.rowOnly && m.tagMode {
+			// act refuses these on a tag row, so advertising them here would
+			// be the same lie the hard-coded line used to tell.
+			continue
+		}
+		if m.Supports(fh.feature) {
+			parts = append(parts, fh.text)
+		}
+	}
+	parts = append(parts, "esc quit")
+	return strings.Join(parts, " · ")
 }
 
 // renderRow lays one row out in plain text, clips it to the terminal's width,
