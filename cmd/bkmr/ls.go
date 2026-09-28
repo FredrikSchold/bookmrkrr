@@ -32,10 +32,24 @@ func runLs(args []string) error {
 	fs.SetOutput(io.Discard)
 	tag := fs.String("tag", "", "only bookmarks carrying this tag")
 	// parsePermuted for one shape of argument handling across the CLI; see
-	// main.go. ls has no positional argument of its own, so nothing is done with
-	// what comes back: a stray word is ignored, exactly as it was before.
-	if _, err := parsePermuted(fs, args); err != nil {
+	// main.go. It also catches a stray word typed after a flag, which arrives by a
+	// different route than one typed before it.
+	rest, err := parsePermuted(fs, args)
+	if err != nil {
 		fmt.Fprintf(errOut, "bkmr: %v\n", err)
+		return errUsage
+	}
+	// Refused rather than ignored, the same call 'bkmr tab' makes. 'bkmr ls rust'
+	// used to print the entire vault: the word was dropped and the output looked
+	// exactly like a successful listing, so a person who meant '--tag rust' would
+	// read the result as a tag that matches everything rather than an argument
+	// that was thrown away.
+	//
+	// %q on the echoed word, as everywhere else a refusal quotes back what it was
+	// given: the argument comes off the command line and may carry anything,
+	// including an escape sequence, and this line goes to a terminal.
+	if len(rest) > 0 {
+		fmt.Fprintf(errOut, "bkmr: ls takes no arguments - to filter, use 'bkmr ls --tag name' (got %q)\n", rest[0])
 		return errUsage
 	}
 

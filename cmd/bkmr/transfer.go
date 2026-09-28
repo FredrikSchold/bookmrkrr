@@ -153,8 +153,19 @@ func runImport(args []string) error {
 	return nil
 }
 
-// hrefPattern matches one anchor in a Netscape bookmark file.
-var hrefPattern = regexp.MustCompile(`(?is)<a\s+[^>]*href="([^"]+)"[^>]*>(.*?)</a>`)
+// hrefPattern matches one anchor in a Netscape bookmark file. Either quoting
+// style, because both are legal HTML and anything that writes a bookmark file
+// through a templating layer may emit single quotes. Matching only double quotes
+// meant such an anchor was never seen at all - not rejected, not counted as
+// skipped, just absent, which is the one thing parseImport's own comment says
+// must not happen.
+//
+// Two capture groups for the URL, one per quoting style, and exactly one of them
+// is ever non-empty for a given match. The inner classes are * rather than +
+// deliberately: href="" is an anchor with no URL, and letting it match hands it
+// to NormalizeURL to reject and to AddAll to count, rather than dropping it the
+// silent way this change exists to stop.
+var hrefPattern = regexp.MustCompile(`(?is)<a\s+[^>]*href=(?:"([^"]*)"|'([^']*)')[^>]*>(.*?)</a>`)
 
 // parseImport reads either the JSON this tool exports or the Netscape bookmark
 // HTML that every browser exports, chosen by the first character. Titles in the
@@ -177,8 +188,10 @@ func parseImport(data []byte) ([]model.Bookmark, error) {
 		// Whether a URL is one bkmr will store is model.NormalizeURL's decision
 		// and nobody else's, and AddAll is where it gets made and counted - so a
 		// skipped entry is reported to the user instead of vanishing here.
-		href := html.UnescapeString(m[1])
-		title := strings.Join(strings.Fields(html.UnescapeString(stripTags(m[2]))), " ")
+		// m[1] is the double-quoted href and m[2] the single-quoted one; the
+		// alternation guarantees the other is empty.
+		href := html.UnescapeString(m[1] + m[2])
+		title := strings.Join(strings.Fields(html.UnescapeString(stripTags(m[3]))), " ")
 		found = append(found, model.Bookmark{URL: href, Title: title})
 	}
 	if found == nil {

@@ -416,3 +416,60 @@ func TestExportRefusesToOverwriteAnExistingFile(t *testing.T) {
 		t.Error("the refused export wrote the vault into the existing file")
 	}
 }
+
+// Single-quoted href attributes were dropped without a word, which contradicts
+// the one principle this file states about importing: whether a URL is one bkmr
+// stores is NormalizeURL's decision, and an entry it rejects is counted and
+// reported rather than vanishing. An anchor the pattern never matched was not
+// rejected - it was never seen, so it was not even in the skipped count.
+//
+// Single quotes are legal HTML and real exporters emit them; anything that
+// serializes a bookmark file through a templating layer may. Four anchors here,
+// two of each quoting style, and all four have to arrive.
+func TestImportAcceptsSingleQuotedHrefs(t *testing.T) {
+	newVaultForTest(t, "pw")
+	path := filepath.Join(t.TempDir(), "bookmarks.html")
+	body := "<!DOCTYPE NETSCAPE-Bookmark-file-1>\n<DL><p>\n" +
+		"  <DT><A HREF=\"https://double.example/one\" ADD_DATE=\"1\">Double One</A>\n" +
+		"  <DT><A HREF='https://single.example/two' ADD_DATE='2'>Single Two</A>\n" +
+		"  <DT><A ADD_DATE='3' HREF='https://single.example/three'>Single Three</A>\n" +
+		"  <DT><A HREF=\"https://double.example/four\">Double Four</A>\n" +
+		"</DL>"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr := bothStreams(t, func() {
+		if err := runImport([]string{path}); err != nil {
+			t.Fatalf("runImport() error = %v", err)
+		}
+	})
+	if !strings.Contains(stdout, "imported 4 new") {
+		t.Errorf("stdout = %q, want all four anchors imported", stdout)
+	}
+	if strings.Contains(stderr, "skipped") {
+		t.Errorf("stderr = %q, want nothing skipped", stderr)
+	}
+
+	v, _ := openVault()
+	c, _ := v.Load()
+	if len(c.Bookmarks) != 4 {
+		t.Fatalf("len(Bookmarks) = %d, want 4 - a single-quoted href must not be silently lost", len(c.Bookmarks))
+	}
+	titles := map[string]string{}
+	for _, b := range c.Bookmarks {
+		titles[b.URL] = b.Title
+	}
+	for url, want := range map[string]string{
+		"https://double.example/one":   "Double One",
+		"https://single.example/two":   "Single Two",
+		"https://single.example/three": "Single Three",
+		"https://double.example/four":  "Double Four",
+	} {
+		if got, ok := titles[url]; !ok {
+			t.Errorf("%s is missing from the vault", url)
+		} else if got != want {
+			t.Errorf("%s title = %q, want %q", url, got, want)
+		}
+	}
+}

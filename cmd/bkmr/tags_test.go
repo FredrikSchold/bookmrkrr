@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -37,5 +38,29 @@ func TestTagsOnAnUntaggedVaultSaysSo(t *testing.T) {
 	got := capture(t, func() { runTags(nil) })
 	if !strings.Contains(strings.ToLower(got), "no tags") {
 		t.Errorf("runTags() = %q, want it to report no tags", got)
+	}
+}
+
+// 'bkmr tags rust' listed every tag. tags takes no arguments at all, so a word
+// after it is a mistake - probably 'bkmr ls --tag rust' - and printing the full
+// list as though nothing happened hides it.
+func TestTagsRefusesAnArgument(t *testing.T) {
+	newVaultForTest(t, "pw")
+	capture(t, func() { runAdd([]string{"--no-fetch", "-t", "rust", "https://a.example"}) })
+
+	var err error
+	var stdout string
+	stderr := captureErr(t, func() {
+		stdout = capture(t, func() { err = runTags([]string{"rust"}) })
+	})
+
+	if !errors.Is(err, errUsage) {
+		t.Fatalf("runTags() error = %v, want errUsage", err)
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want nothing printed when the arguments are refused", stdout)
+	}
+	if !strings.Contains(stderr, "takes no arguments") {
+		t.Errorf("stderr = %q, want a line explaining the refusal", stderr)
 	}
 }

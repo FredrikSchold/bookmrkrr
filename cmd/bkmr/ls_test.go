@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -171,5 +172,46 @@ func TestLsPrintsTheURLOnceWhenThereIsNoTitle(t *testing.T) {
 
 	if n := strings.Count(got, "https://untitled.example/page"); n != 1 {
 		t.Errorf("runLs() = %q, want the URL exactly once, got it %d times", got, n)
+	}
+}
+
+// 'bkmr ls rust' printed the whole vault. Somebody who typed it meant
+// '--tag rust', and being handed every bookmark with no complaint reads as a
+// tag that matched everything rather than an argument that was thrown away.
+// Refused for the same reason 'bkmr tab <url>' is.
+func TestLsRefusesAPositionalArgument(t *testing.T) {
+	newVaultForTest(t, "pw")
+	addForTest(t, "-t", "rust", "https://a.example")
+
+	var err error
+	var stdout string
+	stderr := captureErr(t, func() {
+		stdout = capture(t, func() { err = runLs([]string{"rust"}) })
+	})
+
+	if !errors.Is(err, errUsage) {
+		t.Fatalf("runLs() error = %v, want errUsage", err)
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want nothing printed when the arguments are refused", stdout)
+	}
+	if !strings.Contains(stderr, "--tag") {
+		t.Errorf("stderr = %q, want the refusal to name --tag", stderr)
+	}
+}
+
+// The same refusal when the stray word follows a flag, which parsePermuted
+// hands back through a different route.
+func TestLsRefusesAPositionalArgumentAfterAFlag(t *testing.T) {
+	newVaultForTest(t, "pw")
+
+	var err error
+	stderr := captureErr(t, func() { err = runLs([]string{"--tag", "rust", "extra"}) })
+
+	if !errors.Is(err, errUsage) {
+		t.Fatalf("runLs() error = %v, want errUsage", err)
+	}
+	if !strings.Contains(stderr, "bkmr:") {
+		t.Errorf("stderr = %q, want a line explaining the refusal", stderr)
 	}
 }
