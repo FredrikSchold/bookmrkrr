@@ -369,6 +369,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			return m.act(ActionOpen)
+		// Both go through act rather than finish, and that is the whole guard
+		// against copying or deleting a tag row: see act's doc comment.
 		case tea.KeyCtrlY:
 			return m.act(ActionCopy)
 		case tea.KeyCtrlD:
@@ -505,6 +507,13 @@ func renderRow(it Item, selected bool, width int) string {
 // which is where all of them enter the vault, and cmd/bkmr applies the same
 // model.CleanTitle to a browser tab's title before this package ever sees it.
 // Do not add a second pass here - one owner, at the boundary where data enters.
+//
+// A URL is held to the same precondition by a different rule: model.NormalizeURL
+// refuses a URL carrying a control character or invalid UTF-8 rather than
+// cleaning it, and that check runs on insert only - it is not repeated on the
+// write path the way title, note and tag cleaning is. It is total today because
+// model.Collection.add is the only writer of Bookmark.URL. A future path that
+// writes a URL without going through add owes this function the same guarantee.
 func clip(s string, width int) string {
 	if width <= 0 {
 		return ""

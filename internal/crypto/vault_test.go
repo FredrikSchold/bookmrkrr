@@ -76,6 +76,16 @@ func TestOpenRejectsDowngradedKDFParams(t *testing.T) {
 	// test would keep passing while no longer exercising the AD binding at all.
 	binary.BigEndian.PutUint32(blob[10:14], 4096)
 
+	// Asserted, not merely explained above. This is the only test that proves the
+	// header is bound in as associated data, and it goes vacuous the moment the
+	// downgraded value falls outside SaltOf's bounds - Open would then refuse for
+	// the wrong reason and still satisfy the check below. A future bounds change
+	// that excludes 4096 has to fail here rather than quietly hollow this out.
+	if _, _, err := SaltOf(blob); err != nil {
+		t.Fatalf("SaltOf() error = %v on the downgraded header; the value must stay inside SaltOf's bounds "+
+			"or this test stops exercising the associated-data binding at all", err)
+	}
+
 	if _, err := Open(key, blob); !errors.Is(err, ErrBadVault) {
 		t.Errorf("Open() error = %v, want ErrBadVault", err)
 	}

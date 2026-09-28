@@ -94,6 +94,83 @@ func TestNormalizeURLKeepsOrdinaryUnicode(t *testing.T) {
 	}
 }
 
+// The control-character rule is written in runes, and a URL that is not valid
+// UTF-8 has no runes to inspect: strings.IndexFunc decodes a lone 0x9B byte as
+// U+FFFD, which is not a control character, so the rune-based check waves it
+// through. What then gets stored is the raw byte, and ls prints the stored URL
+// verbatim - so a non-UTF-8 browser export could carry a single-byte CSI into
+// the terminal by the one route the rune check cannot see.
+//
+// Written as a byte slice rather than a string literal deliberately: the byte
+// has to be invalid UTF-8 on its own, and string(rune(0x9b)) is the two-byte
+// UTF-8 encoding of U+009B, which the rune check already refuses.
+func TestNormalizeURLRejectsInvalidUTF8(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		in   string
+	}{
+		{"lone C1 byte in the path", "https://evil.example/a" + string([]byte{0x9b}) + "2JZ"},
+		{"lone C1 byte in the query", "https://evil.example/a?q=" + string([]byte{0x9b}) + "2J"},
+		{"truncated multi-byte sequence", "https://evil.example/a" + string([]byte{0xe2, 0x82}) + "b"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got, err := NormalizeURL(tt.in); err == nil {
+				t.Errorf("NormalizeURL(%q) = %q, want an error", tt.in, got)
+			}
+		})
+	}
+}
+
+// The counterpart to the test above, so that the UTF-8 check cannot be
+// tightened into refusing the perfectly ordinary case: a URL whose path or host
+// carries real multi-byte UTF-8 is valid and must still normalize.
+func TestNormalizeURLKeepsValidMultiByteUTF8(t *testing.T) {
+	for _, in := range []string{
+		"https://example.com/café",
+		"https://example.com/日本語",
+		"https://xn--e1afmkfd.example/путь",
+		"https://example.com/?q=\U0001f600",
+	} {
+		if _, err := NormalizeURL(in); err != nil {
+			t.Errorf("NormalizeURL(%q) error = %v, want valid multi-byte UTF-8 accepted", in, err)
+		}
+	}
+}
+
+// The headline promise of the normalizer is that it is used for comparison and
+// nothing else: what lands in the vault is the URL the user gave, tracking
+// parameters, uppercase host, trailing slash and all. The README sells that
+// explicitly, and until now only NormalizeURL's own return value was asserted -
+// nothing checked the field that Add actually writes.
+func TestAddStoresTheOriginalURLNotTheNormalizedOne(t *testing.T) {
+	const original = "HTTPS://Example.COM/Path/?utm_source=news&fbclid=xyz&q=1"
+
+	c := Collection{Version: Version}
+	got, merged, err := c.Add(Bookmark{URL: original})
+	if err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	if merged {
+		t.Fatal("Add() merged into an empty collection")
+	}
+	if got.URL != original {
+		t.Errorf("Add() returned URL = %q, want the original %q", got.URL, original)
+	}
+	if c.Bookmarks[0].URL != original {
+		t.Errorf("stored URL = %q, want the original %q", c.Bookmarks[0].URL, original)
+	}
+
+	// And the normalized form is genuinely different, so the assertion above is
+	// not passing because there was nothing to normalize.
+	key, err := NormalizeURL(original)
+	if err != nil {
+		t.Fatalf("NormalizeURL() error = %v", err)
+	}
+	if key == original {
+		t.Fatalf("NormalizeURL(%q) = the input; pick an input the normalizer changes", original)
+	}
+}
+
 func TestNormalizeTags(t *testing.T) {
 	got := NormalizeTags([]string{" Rust ", "rust", "Go Lang", "", "  ", "Web/Dev"})
 	want := []string{"go-lang", "rust", "web/dev"}

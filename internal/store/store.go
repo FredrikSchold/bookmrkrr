@@ -164,6 +164,17 @@ func (v *Vault) Mutate(fn func(*model.Collection) error) error {
 // anything new about bookmarks - what "clean" means stays entirely inside
 // model - it only declines to encrypt a collection that has not been asked to
 // tidy itself first.
+//
+// Titles, notes and tags, then - and not URLs. Clean deliberately does not
+// touch Bookmark.URL, because a URL cannot be cleaned: dropping a byte out of
+// one changes where it points, so model.NormalizeURL refuses a bad URL instead
+// of repairing it, and refusal is not something this gate can do. It would have
+// to either discard the user's bookmark on the way to disk - silent data loss -
+// or fail the write, which would leave a vault that already held one such entry
+// permanently unsaveable. URLs are validated where they enter instead:
+// model.Collection.add calls NormalizeURL on every insert and nothing else in
+// the tree assigns Bookmark.URL. Any future path that writes a URL outside add
+// must call model.NormalizeURL itself; this gate will not catch it.
 func (v *Vault) write(c *model.Collection) error {
 	c.Clean()
 

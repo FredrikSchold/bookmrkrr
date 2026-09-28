@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Version is the plaintext document version stored inside the vault.
@@ -53,6 +54,21 @@ func NormalizeURL(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return "", fmt.Errorf("empty URL")
+	}
+	// Refused before the control-character check below, because that check is
+	// written in runes and a string that is not valid UTF-8 has no runes to
+	// inspect. strings.IndexFunc decodes a lone 0x9B byte as U+FFFD, which is not
+	// a control character, so the rune scan waves it through - and what gets
+	// stored is the raw URL, which ls prints verbatim. A single-byte CSI would
+	// then reach the terminal by the one route the rune check cannot see. A
+	// non-UTF-8 browser export is how it would arrive.
+	//
+	// Refusing rather than repairing, for the same reason the control-character
+	// check refuses: a URL with a byte rewritten points somewhere else. And
+	// refusing the whole string rather than only the C1 range - a URL that is not
+	// valid UTF-8 is not a URL this tool can store, print or compare honestly.
+	if !utf8.ValidString(raw) {
+		return "", fmt.Errorf("URL is not valid UTF-8: %q", raw)
 	}
 	// A control character in a URL is refused, not cleaned. Every other string
 	// this package stores gets the characters stripped out of it, because a title
@@ -276,6 +292,15 @@ func (c *Collection) add(b Bookmark, idx map[string]int) (Bookmark, bool, error)
 // to pass through. A command that prints what it wrote before the write happens
 // still has to clean that text itself, because this guards what is stored rather
 // than what is printed.
+//
+// URLs are outside its remit, deliberately, so "no control characters anywhere
+// in the vault" is not what this guarantees. A URL is refused rather than
+// cleaned - see NormalizeURL - and a gate on the write path cannot refuse: it
+// would have to drop the bookmark or fail every later save of a vault that
+// already holds one. So Bookmark.URL is validated at insert and only there, by
+// add, which is the sole writer of that field in the tree. A future path that
+// sets a URL without going through add has to call NormalizeURL itself; nothing
+// downstream will catch it.
 func (c *Collection) Clean() {
 	for i := range c.Bookmarks {
 		c.Bookmarks[i].Title = CleanTitle(c.Bookmarks[i].Title)
