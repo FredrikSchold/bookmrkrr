@@ -1,0 +1,35 @@
+version: 2
+
+project_name: bkmr
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: bkmr
+    main: ./cmd/bkmr
+    binary: bkmr
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+
+archives:
+  - formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+      - LICENSE
+      - SECURITY.md
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github
+  sort: asc
