@@ -107,34 +107,55 @@ func TestHintNamesTheDebugFlag(t *testing.T) {
 	}
 }
 
-// The brief's own filter list stops at the schemes Chrome, Edge and Brave use.
-// A tab whose URL cannot be revisited - a blob: or data: URL is meaningless the
-// moment the tab closes - and the other Chromium browsers' own pages are junk in
-// front of the user for the same reason chrome:// is.
-func TestTabsFiltersTheOtherUnsavableSchemes(t *testing.T) {
+// The filter is a whitelist: http and https, and nothing else. A blacklist of
+// internal schemes left the user a chooser full of dead options, because
+// model.NormalizeURL accepts only http and https - so a file:// or ftp: tab was
+// listed, picked, and then refused by Add, after the vault had already asked for
+// a password. Every one of these must be gone, and the two that matter most are
+// the ones a prefix list would miss: a blob: or data: URL cannot be revisited
+// once its tab closes, and view-source: wraps a URL that does start with https.
+func TestTabsKeepsOnlyHTTPAndHTTPS(t *testing.T) {
 	serveTabs(t, `[
-	  {"type":"page","title":"Blob","url":"blob:https://example.com/9f2"},
-	  {"type":"page","title":"Data","url":"data:text/html,<p>hi"},
+	  {"type":"page","title":"Settings","url":"chrome://settings/"},
+	  {"type":"page","title":"Ext","url":"chrome-extension://abcdef/popup.html"},
+	  {"type":"page","title":"Edge","url":"edge://settings/"},
+	  {"type":"page","title":"Brave","url":"brave://rewards/"},
 	  {"type":"page","title":"Vivaldi","url":"vivaldi://settings/"},
 	  {"type":"page","title":"Opera","url":"opera://about/"},
-	  {"type":"page","title":"New Tab","url":"chrome-search://local-ntp/local-ntp.html"},
-	  {"type":"page","title":"Keep","url":"https://keep.example/"}
+	  {"type":"page","title":"NTP","url":"chrome-search://local-ntp/local-ntp.html"},
+	  {"type":"page","title":"Native","url":"chrome-native://newtab/"},
+	  {"type":"page","title":"Untrusted","url":"chrome-untrusted://print/"},
+	  {"type":"page","title":"DevTools","url":"devtools://devtools/bundled/x.html"},
+	  {"type":"page","title":"About","url":"about:blank"},
+	  {"type":"page","title":"Source","url":"view-source:https://example.com/"},
+	  {"type":"page","title":"Blob","url":"blob:https://example.com/9f2"},
+	  {"type":"page","title":"Data","url":"data:text/html,<p>hi"},
+	  {"type":"page","title":"Local file","url":"file:///C:/notes.txt"},
+	  {"type":"page","title":"FTP","url":"ftp://ftp.example.com/pub/"},
+	  {"type":"page","title":"Failed","url":"chrome-error://chromewebdata/"},
+	  {"type":"page","title":"Filesystem","url":"filesystem:https://example.com/temporary/x"},
+	  {"type":"page","title":"Custom handler","url":"zoommtg://zoom.us/join?confno=1"},
+	  {"type":"page","title":"Nothing","url":""},
+	  {"type":"page","title":"Keep plain","url":"http://plain.example/"},
+	  {"type":"page","title":"Keep secure","url":"https://keep.example/"}
 	]`)
 
 	tabs, err := Tabs(context.Background())
 	if err != nil {
 		t.Fatalf("Tabs() error = %v", err)
 	}
-	if len(tabs) != 1 || tabs[0].URL != "https://keep.example/" {
-		t.Errorf("Tabs() = %+v, want only the https page", tabs)
+	if len(tabs) != 2 {
+		t.Fatalf("Tabs() = %d tabs, want only the http and https ones: %+v", len(tabs), tabs)
+	}
+	if tabs[0].URL != "http://plain.example/" || tabs[1].URL != "https://keep.example/" {
+		t.Errorf("Tabs() = %+v, want the two http(s) pages", tabs)
 	}
 }
 
-// A page still loading, a PDF, or a download has no title. Dropping the tab
-// would hide something the user can see in their own tab strip, and an empty
-// Label would render as a blank row in the picker, so the URL stands in.
-func TestATabWithNoTitleFallsBackToItsURL(t *testing.T) {
-	serveTabs(t, `[{"type":"page","title":"   ","url":"https://untitled.example/paper.pdf"}]`)
+// An uppercase scheme is still the same scheme. Chrome reports lowercase, so
+// this is about the prefix test not being accidentally case-sensitive.
+func TestTabsKeepsAnUppercaseScheme(t *testing.T) {
+	serveTabs(t, `[{"type":"page","title":"Shouty","url":"HTTPS://Example.com/A"}]`)
 
 	tabs, err := Tabs(context.Background())
 	if err != nil {
@@ -143,8 +164,28 @@ func TestATabWithNoTitleFallsBackToItsURL(t *testing.T) {
 	if len(tabs) != 1 {
 		t.Fatalf("Tabs() = %d tabs, want 1", len(tabs))
 	}
-	if tabs[0].Title != "https://untitled.example/paper.pdf" {
-		t.Errorf("Title = %q, want the URL to stand in for the missing title", tabs[0].Title)
+}
+
+// A tab that is still loading, or showing a PDF or a download, has no title.
+// Dropping it would hide a tab the user can see in their own tab strip, so it is
+// kept with an empty title - and left empty, rather than filled in with the URL:
+// cmd/bkmr shows the URL in the picker row and stores no title at all, so ls does
+// not end up printing the URL twice for that bookmark.
+func TestATabWithNoTitleIsKeptWithAnEmptyTitle(t *testing.T) {
+	serveTabs(t, `[{"type":"page","title":"   ","url":"https://untitled.example/paper.pdf"}]`)
+
+	tabs, err := Tabs(context.Background())
+	if err != nil {
+		t.Fatalf("Tabs() error = %v", err)
+	}
+	if len(tabs) != 1 {
+		t.Fatalf("Tabs() = %d tabs, want the untitled tab kept", len(tabs))
+	}
+	if tabs[0].Title != "" {
+		t.Errorf("Title = %q, want it left empty", tabs[0].Title)
+	}
+	if tabs[0].URL != "https://untitled.example/paper.pdf" {
+		t.Errorf("URL = %q, want it unchanged", tabs[0].URL)
 	}
 }
 

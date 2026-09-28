@@ -4,6 +4,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/FredrikSchold/bookmrkrr/internal/tui"
 )
 
 func TestTabSavesTheChosenTabWithoutFetching(t *testing.T) {
@@ -202,4 +204,111 @@ func TestATitleWithEscapesIsStrippedAtEveryDoor(t *testing.T) {
 			t.Errorf("stored Notes = %q, want no control characters", c.Bookmarks[0].Notes)
 		}
 	})
+}
+
+// chooseTab is replaced for the whole package, so nothing ever executed the one
+// place the reduced feature set and the tab wording are wired. This asserts that
+// wiring directly, which needs no terminal: delete either builder call in
+// tabPickerModel and this fails.
+func TestTheTabPickerOffersOnlyChoosing(t *testing.T) {
+	m := tabPickerModel([]tabChoice{{Title: "One", URL: "https://one.example"}})
+
+	if !m.Supports(tui.FeatureOpen) {
+		t.Error("Supports(FeatureOpen) = false, want true - choosing a tab is the whole point")
+	}
+	for _, off := range []struct {
+		name string
+		f    tui.Features
+	}{
+		{"copy", tui.FeatureCopy},
+		{"delete", tui.FeatureDelete},
+		{"tags", tui.FeatureTags},
+	} {
+		if m.Supports(off.f) {
+			t.Errorf("Supports(%s) = true, want false - it is meaningless on a tab", off.name)
+		}
+	}
+
+	// And the wording, which must not be about bookmarks.
+	empty := tabPickerModel(nil).View()
+	if !strings.Contains(empty, "no open tabs") {
+		t.Errorf("View() with no tabs = %q, want the tab wording", empty)
+	}
+	if strings.Contains(strings.ToLower(empty), "bookmark") {
+		t.Errorf("View() = %q, want nothing about bookmarks in a tab picker", empty)
+	}
+}
+
+// A tab with no title still gets a row the user can read, and that row is the
+// only place the URL stands in for the title: what is stored keeps the empty
+// title, so the bookmark is an ordinary titleless one.
+func TestAnUntitledTabShowsItsURLInTheRowAndStoresNoTitle(t *testing.T) {
+	const url = "https://untitled.example/paper.pdf"
+
+	m := tabPickerModel([]tabChoice{{Title: "", URL: url}})
+	rows := m.Visible()
+	if len(rows) != 1 {
+		t.Fatalf("Visible() = %d rows, want 1", len(rows))
+	}
+	if rows[0].Label != url {
+		t.Errorf("row Label = %q, want the URL to stand in for the missing title", rows[0].Label)
+	}
+
+	newVaultForTest(t, "pw")
+	old := chooseTab
+	chooseTab = func(items []tabChoice) (tabChoice, bool, error) { return items[0], true, nil }
+	defer func() { chooseTab = old }()
+	stubTabs(t, url, "")
+
+	got := capture(t, func() {
+		if err := runTab(nil); err != nil {
+			t.Fatalf("runTab() error = %v", err)
+		}
+	})
+	if !strings.Contains(got, url) {
+		t.Errorf("runTab() output = %q, want it to name the saved tab", got)
+	}
+	if n := strings.Count(got, url); n != 1 {
+		t.Errorf("runTab() output = %q, names the URL %d times, want 1 - there is no title column to fill", got, n)
+	}
+
+	v, _ := openVault()
+	c, _ := v.Load()
+	if len(c.Bookmarks) != 1 {
+		t.Fatalf("len(Bookmarks) = %d, want 1", len(c.Bookmarks))
+	}
+	if c.Bookmarks[0].Title != "" {
+		t.Errorf("stored Title = %q, want it left empty rather than filled in with the URL", c.Bookmarks[0].Title)
+	}
+}
+
+// The URL is half of every picker row, and tui.clip's precondition has to hold
+// for the whole row. Chrome percent-encodes a control byte and NormalizeURL
+// would refuse one, but neither runs before the frame is drawn.
+func TestAControlCharacterInATabURLNeverReachesTheRow(t *testing.T) {
+	newVaultForTest(t, "pw")
+	var shown []tabChoice
+	old := chooseTab
+	chooseTab = func(items []tabChoice) (tabChoice, bool, error) {
+		shown = items
+		return items[0], true, nil
+	}
+	defer func() { chooseTab = old }()
+	stubTabs(t, "https://nasty.example/\x1b[2Ka", "Fine")
+
+	capture(t, func() {
+		if err := runTab(nil); err != nil {
+			t.Fatalf("runTab() error = %v", err)
+		}
+	})
+
+	if len(shown) != 1 {
+		t.Fatalf("chooseTab got %d choices, want 1", len(shown))
+	}
+	if hasControls(shown[0].URL) {
+		t.Errorf("the picker was handed URL %q, which still contains a control character", shown[0].URL)
+	}
+	if want := "https://nasty.example/[2Ka"; shown[0].URL != want {
+		t.Errorf("row URL = %q, want %q", shown[0].URL, want)
+	}
 }

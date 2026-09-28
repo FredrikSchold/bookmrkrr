@@ -18,17 +18,26 @@ type tabChoice struct {
 	URL   string
 }
 
-// chooseTab is a seam so tests do not need a terminal.
+// tabPickerModel builds the picker for a list of tabs.
 //
-// tui.Run starts a bubbletea program on the alt screen, so a test that reached
-// the real one would take over the terminal of whoever ran the suite - the same
-// reason tui.Open is a variable. Every test in this package replaces it.
-var chooseTab = func(choices []tabChoice) (tabChoice, bool, error) {
+// Separate from chooseTab because chooseTab is a seam every test in this package
+// replaces, so anything wired inside it would never run under test: deleting the
+// WithFeatures or WithEmptyMessage call below would have failed nothing. This
+// function needs no terminal, so a test can assert on it directly.
+func tabPickerModel(choices []tabChoice) tui.Model {
 	items := make([]tui.Item, len(choices))
 	for i, c := range choices {
+		// A tab with no title shows its URL, so the row is never blank and no
+		// tab the user can see in their own tab strip is hidden. Only the row
+		// does this: what gets stored keeps the empty title, so the bookmark is
+		// an ordinary titleless one rather than one carrying a fabricated title.
+		label := c.Title
+		if label == "" {
+			label = c.URL
+		}
 		items[i] = tui.Item{
 			ID:     fmt.Sprint(i),
-			Label:  c.Title,
+			Label:  label,
 			Detail: c.URL,
 			Filter: strings.ToLower(c.Title + " " + c.URL),
 		}
@@ -37,13 +46,21 @@ var chooseTab = func(choices []tabChoice) (tabChoice, bool, error) {
 	// are all switched off: tabs carry no tags for tag mode to list, and there
 	// is nothing here to copy or delete. The picker's help line is rendered
 	// from that same set, so it advertises only enter and esc. The empty
-	// message is unreachable - runTab reports an empty tab list itself, below -
-	// but the default names bookmarks and 'bkmr add', which would be nonsense
-	// on a tab picker, so it is not left to chance.
-	m := tui.New(items, "which tab?").
+	// message is unreachable in practice - runTab reports an empty tab list
+	// itself, below - but the default names bookmarks and 'bkmr add', which
+	// would be nonsense on a tab picker, so it is not left to chance.
+	return tui.New(items, "which tab?").
 		WithEmptyMessage("no open tabs").
 		WithFeatures(tui.FeatureOpen)
-	item, action, err := tui.Run(m)
+}
+
+// chooseTab is a seam so tests do not need a terminal.
+//
+// tui.Run starts a bubbletea program on the alt screen, so a test that reached
+// the real one would take over the terminal of whoever ran the suite - the same
+// reason tui.Open is a variable. Every test in this package replaces it.
+var chooseTab = func(choices []tabChoice) (tabChoice, bool, error) {
+	item, action, err := tui.Run(tabPickerModel(choices))
 	if err != nil || action != tui.ActionOpen {
 		return tabChoice{}, false, err
 	}
@@ -110,9 +127,16 @@ func runTab(args []string) error {
 	// picker puts it on screen before anything is saved - cleaning it at storage
 	// time would be too late for the frame the picker draws. Add applies the
 	// same rule again on the way into the vault; it is idempotent.
+	//
+	// The URL goes through it too. Chrome percent-encodes a control byte in a
+	// URL, and NormalizeURL would refuse one at save time, but neither of those
+	// runs before the picker draws the row - and the URL is half of every row.
+	// tui.clip's precondition has to be true for the whole row or it is not true
+	// at all. CleanTitle is named for its common caller, not for its rule, which
+	// is simply one line of text made safe to store and to print.
 	choices := make([]tabChoice, len(tabs))
 	for i, t := range tabs {
-		choices[i] = tabChoice{Title: model.CleanTitle(t.Title), URL: t.URL}
+		choices[i] = tabChoice{Title: model.CleanTitle(t.Title), URL: model.CleanTitle(t.URL)}
 	}
 	picked, ok, err := chooseTab(choices)
 	if err != nil {
@@ -138,6 +162,13 @@ func runTab(args []string) error {
 
 	if merged {
 		fmt.Fprintf(out, "already saved as %s (%s); tags are now %s\n", stored.ID, stored.URL, tagsOrNone(stored.Tags))
+		return nil
+	}
+	// A tab with no title stores none, so the title column is dropped rather
+	// than printed blank. label() is not used here: it falls back to the URL,
+	// which this line already ends with.
+	if stored.Title == "" {
+		fmt.Fprintf(out, "saved %s  %s\n", stored.ID, stored.URL)
 		return nil
 	}
 	fmt.Fprintf(out, "saved %s  %s  %s\n", stored.ID, stored.Title, stored.URL)

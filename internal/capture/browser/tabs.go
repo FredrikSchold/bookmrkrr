@@ -52,22 +52,6 @@ type devtoolsTarget struct {
 	URL   string `json:"url"`
 }
 
-// internalSchemes are the URLs a bookmark manager must never offer to save:
-// either the browser's own pages, or a URL that cannot be revisited later.
-//
-// The first eight are the browser-internal ones. The rest were added because
-// each would otherwise put junk in front of the user: blob: and data: URLs are
-// meaningless the moment the tab that holds them closes, chrome-search:// is
-// Chrome's own new-tab page, and Vivaldi and Opera are Chromium browsers whose
-// internal pages use their own scheme rather than chrome://, exactly as Edge's
-// and Brave's do.
-var internalSchemes = []string{
-	"chrome://", "chrome-extension://", "devtools://", "about:",
-	"edge://", "brave://", "chrome-untrusted://", "view-source:",
-	"vivaldi://", "opera://", "chrome-search://", "chrome-native://",
-	"blob:", "data:",
-}
-
 // Tabs returns the real pages open in the first browser that answers.
 func Tabs(ctx context.Context) ([]Tab, error) {
 	client := &http.Client{Timeout: 2 * time.Second}
@@ -79,10 +63,17 @@ func Tabs(ctx context.Context) ([]Tab, error) {
 		}
 		tabs := make([]Tab, 0, len(targets))
 		for _, t := range targets {
-			if t.Type != "page" || isInternal(t.URL) {
+			if t.Type != "page" || !savable(t.URL) {
 				continue
 			}
-			tabs = append(tabs, Tab{Title: titleOf(t), URL: t.URL})
+			// The whitespace is collapsed because document.title keeps whatever
+			// the markup had - a <title> written across two indented lines really
+			// does arrive with a newline and a tab in it, and only the tab strip
+			// collapses it for display. An empty title is left empty rather than
+			// filled in with the URL: cmd/bkmr shows the URL in the picker row
+			// for a tab with no title, and stores no title at all, so ls does not
+			// print the URL twice for that bookmark.
+			tabs = append(tabs, Tab{Title: strings.Join(strings.Fields(t.Title), " "), URL: t.URL})
 		}
 		return tabs, nil
 	}
@@ -113,35 +104,28 @@ func probe(ctx context.Context, client *http.Client, base string) ([]devtoolsTar
 	return targets, nil
 }
 
-// titleOf is the label for one tab.
+// savable reports whether a tab's URL is one a bookmark can actually be made
+// from: http or https, and nothing else.
 //
-// The whitespace is collapsed because document.title keeps whatever the markup
-// had - a <title> written across two indented lines really does arrive with a
-// newline and a tab in it, and only the tab strip collapses it for display.
-// Left alone, one of those would break the picker's one-row-per-tab layout and
-// split the saved line the command prints in two. internal/fetch collapses page
-// titles for the same reason; a title from a browser tab comes from the same
-// place, which is a page, not the user.
+// A whitelist, deliberately, because the blacklist it replaces was not merely
+// incomplete - it was the wrong shape. model.NormalizeURL accepts only http and
+// https, so every scheme the list did not happen to name was offered to the
+// user, chosen, and then refused by Add, after openVault had already asked for a
+// password. file://, ftp:, chrome-error://, filesystem: and any custom protocol
+// handler page were all dead options in the chooser.
 //
-// An empty title falls back to the URL rather than dropping the tab. A tab that
-// is still loading, or showing a PDF or a download, has no title at all, and
-// hiding a tab the user can see in their own tab strip would be the worse
-// surprise - as would a blank row in the picker.
-func titleOf(t devtoolsTarget) string {
-	if title := strings.Join(strings.Fields(t.Title), " "); title != "" {
-		return title
-	}
-	return t.URL
-}
-
-func isInternal(url string) bool {
-	low := strings.ToLower(url)
-	for _, s := range internalSchemes {
-		if strings.HasPrefix(low, s) {
-			return true
-		}
-	}
-	return low == ""
+// The prefix test also subsumes every scheme that list did name, including the
+// three a scheme-prefix blacklist is worst at: view-source:https://... and
+// blob:https://... both wrap an https URL, and data: carries its payload inline.
+// None of the three starts with http:// or https://, so all of them are gone
+// without being enumerated, along with chrome://, devtools://, about:, the other
+// Chromium browsers' own schemes, and an empty URL.
+//
+// Whether file:// ought to be savable is a question about NormalizeURL, not
+// about this filter.
+func savable(rawURL string) bool {
+	low := strings.ToLower(rawURL)
+	return strings.HasPrefix(low, "http://") || strings.HasPrefix(low, "https://")
 }
 
 // Hint returns the platform-specific command that enables the debug port, so
