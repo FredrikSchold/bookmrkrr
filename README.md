@@ -101,11 +101,11 @@ you `bkmr add` a URL from an argument or the clipboard, `bkmr` makes **one plain
 - A fixed, uninformative `User-Agent` (`bkmr/0.1` plus the project URL). It is
   not configurable, because a configurable one is a place to leak identity.
 - **3-second timeout.**
-- **At most 3 redirects, and only within the same site.** A leading `www.`
-  counts as the same site, in both directions; every other subdomain does not,
-  and neither does a different port. Each hop is compared against the URL you
-  asked for, not the previous hop, so a chain cannot walk away one host at a
-  time.
+- **At most 3 requests in a redirect chain** — the original plus two hops
+  followed — **and only within the same site.** A leading `www.` counts as the
+  same site, in both directions; every other subdomain does not, and neither
+  does a different port. Each hop is compared against the URL you asked for, not
+  the previous hop, so a chain cannot walk away one host at a time.
 - **The response body is capped at 64 KiB** and scanned only for `<title>`.
 - A declared non-HTML content type is skipped without reading the body at all.
 - **The URL requested is the normalized one**, so tracking parameters
@@ -142,10 +142,17 @@ you turn the network off, run one `bkmr add` and check that nothing complains.
 
 **The entire network surface is two files:** `internal/fetch/title.go` (title
 fetching) and `internal/capture/browser/tabs.go` (the loopback DevTools query
-that `bkmr tab` uses). A test in `internal/boundary` fails the build if
-`net/http` is imported anywhere else in non-test code, and the same package
-pins all cryptography to `internal/crypto` and the direct dependency count to
-nine. Those are tests, not prose: CI runs them on every push.
+that `bkmr tab` uses). A test in `internal/boundary` fails the build if any
+package outside those two imports something that can open a connection in
+non-test code — `net`, `net/http` and its relatives, `crypto/tls`, anything
+under `golang.org/x/net/` — and the same package pins all cryptography to
+`internal/crypto` and the direct dependency count to nine. Those are tests, not
+prose: CI runs them on every push.
+
+The one thing those tests cannot bound is a subprocess. `bkmr` shells out twice
+on purpose — to launch your browser, and to read the clipboard — and a socket
+opened by another program is not something an import graph can see. That gap is
+closed by review, not by a test.
 
 ## Threat model
 
@@ -266,7 +273,14 @@ go build ./cmd/bkmr      # CGO_ENABLED=0 works; there is no C code
 go test ./...
 ```
 
-Nine direct dependencies, and a test that fails if that becomes ten. See
-[CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
+Nine direct dependencies, pinned in **both** directions by a test: it fails at
+ten, and it also fails at eight. The ceiling is the point — every direct module
+is code running in the same address space as your vault key — but the floor is
+what keeps the ceiling honest, because `go get` has twice left a module here
+marked `// indirect` that the build in fact imports directly, and a count that
+silently reads too low would let a tenth dependency in unnoticed. So if you
+legitimately remove a dependency, expect the test to fail and lower the constant
+in the same commit. See [CONTRIBUTING.md](CONTRIBUTING.md) and
+[SECURITY.md](SECURITY.md).
 
 MIT licensed.

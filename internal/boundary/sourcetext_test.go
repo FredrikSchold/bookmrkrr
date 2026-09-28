@@ -33,8 +33,11 @@ func TestNoLiteralControlCharactersInGoSource(t *testing.T) {
 		}
 		if d.IsDir() {
 			// Nothing under .git is source, and packed objects are full of
-			// arbitrary bytes.
-			if d.Name() == ".git" {
+			// arbitrary bytes. vendor/ is somebody else's code: if anyone ever
+			// runs go mod vendor, one upstream file with an embedded control
+			// byte would turn this project's own guard red, and the fix would
+			// not be ours to make.
+			if d.Name() == ".git" || d.Name() == "vendor" {
 				return fs.SkipDir
 			}
 			return nil

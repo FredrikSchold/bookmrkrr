@@ -46,13 +46,23 @@ parameters first — that is a real refactor, not a line in a test file.
 
 ## The boundary tests are not negotiable
 
-`internal/boundary` holds four rules:
+`internal/boundary` holds five rules:
 
-1. `net/http` is imported only by `internal/fetch` and
-   `internal/capture/browser`.
+1. Networking packages — `net`, `net/http` and its relatives, `crypto/tls`,
+   anything under `golang.org/x/net/` — are imported only by `internal/fetch`
+   and `internal/capture/browser`. (`net/url` is string parsing and is fine
+   anywhere; there is a test that keeps it that way.)
 2. Cryptographic primitives are imported only by `internal/crypto`.
 3. `go.mod` has exactly nine direct dependencies.
 4. No `.go` file contains a literal control character.
+5. Rule 1 is not passing vacuously — the two allowlisted packages must actually
+   be seen importing `net/http`. This is the one you are most likely to trip
+   while refactoring `internal/fetch`, and its failure means nothing is wrong
+   with your code: rule 1 can only prove something when it has something to look
+   at, and this test is what notices when it stopped having that. Move the
+   network code, update `netAllowed`, done. Do not delete it — without it, moving
+   `internal/fetch` and forgetting the allowlist would leave rule 1 green and
+   guarding nothing.
 
 **Do not edit these tests to make a change pass.** They are the enforcement
 behind claims the README makes to users about what this tool does and does not
