@@ -156,11 +156,27 @@ closed by review, not by a test.
 
 ## Threat model
 
-**It protects a vault file that someone else can read.** A stolen laptop
-without full-disk encryption. A leaked backup. An over-shared or cloud-synced
-folder. Another account on a shared machine. Someone browsing your home
-directory. In all of those the attacker has your bytes and not your password,
-and the bytes are useless.
+**It protects a vault file that someone else can read.** A leaked backup. An
+over-shared or cloud-synced folder. A file attached to the wrong message.
+Somebody browsing your home directory. In those the attacker has your bytes and
+not your password, and the bytes are useless.
+
+**When the whole disk is compromised, the OS credential store is what protects
+you — not your password.** A stolen laptop without full-disk encryption, or
+another account on a shared machine, gets more than `vault.bkmr`: the same disk
+holds the derived key that `bkmr init` and `bkmr unlock` cache in the
+operating system's credential store, and that key opens the vault with no password at all. So the
+question there is how well that store is protected. On macOS and Windows it is
+bound to your account password, and an offline copy of the disk does not give it
+up. On Linux it is the Secret Service, which is exactly as strong as the
+keyring's own password — on an auto-login desktop with a blank default keyring
+there is no secret in front of it, and the derived key can be read out of a disk
+image.
+
+**`bkmr lock` removes that second copy.** It deletes the cached key, leaving the
+vault behind your password alone, and the next command prompts for it. Worth
+running before an unencrypted laptop goes into a bag. Full-disk encryption
+solves the same problem better, and is the real answer if the laptop travels.
 
 **It does not protect against malware, or anything else running as you.** Such
 a process can read the cached key straight out of the OS keychain, read `bkmr`'s
@@ -186,6 +202,24 @@ contents, and a short-lived `vault.lock` while a write is in progress.
 both the vault and the config move into that one directory, so a portable or
 throwaway setup is a single environment variable rather than two. The test suite
 relies on this.
+
+### If your vault will not open
+
+`bkmr` says the same thing whether the password was wrong or the file is
+damaged, deliberately: a message that told the two apart would confirm to
+whoever holds the file that a given password was merely wrong rather than the
+file being broken. So the tool cannot narrow it down for you, and the order to
+try things in is:
+
+1. **Type the password again.** This is the common case by a wide margin.
+2. **If you are sure the password is right, suspect the file.** Copy
+   `vault.bkmr` somewhere safe first — whatever is wrong with it, it is still
+   the newest thing you have — then copy `vault.bkmr.bak` over `vault.bkmr` and
+   try once more. The `.bak` holds the contents from before the most recent
+   write, so you lose at most that one change.
+3. **If neither opens,** the vault is one file and its format is documented
+   below; anything that can do Argon2id and XChaCha20-Poly1305 can read it
+   without this tool.
 
 ## File format
 

@@ -44,6 +44,15 @@ and `tui.Open` seams in `cmd/bkmr`). Those swaps are safe only while tests in a
 package run one at a time. If you want parallel tests, the seams have to become
 parameters first — that is a real refactor, not a line in a test file.
 
+`keyring.MockInit` belongs on that list and is the one with real consequences.
+It is a global switch inside `github.com/zalando/go-keyring` that redirects the
+whole package to an in-memory store, and every test that touches the vault calls
+it. A test that ran in parallel with one calling `MockInitWithError`, or that
+started before the `MockInit` in another test's `t.Cleanup` had landed, could
+find the switch pointing at the platform's real credential store — and then
+write the test's key into **your** keychain. Nothing else in this repository can
+reach outside `t.TempDir()`. That one can.
+
 ## The boundary tests are not negotiable
 
 `internal/boundary` holds five rules:
