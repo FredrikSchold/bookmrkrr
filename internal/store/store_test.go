@@ -11,6 +11,10 @@ import (
 	"github.com/FredrikSchold/bookmrkrr/internal/model"
 )
 
+// testParams is cheap on purpose: these tests derive real keys and Argon2id at
+// production cost would dominate the package's runtime.
+var testParams = crypto.Params{Time: 1, MemoryKiB: 8 * 1024, Threads: 1}
+
 func newTestVault(t *testing.T) (*Vault, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -18,8 +22,8 @@ func newTestVault(t *testing.T) (*Vault, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	key := crypto.DeriveKey([]byte("pw"), salt, crypto.Params{Time: 1, MemoryKiB: 8 * 1024, Threads: 1})
-	if err := Create(dir, key, salt); err != nil {
+	key := crypto.DeriveKey([]byte("pw"), salt, testParams)
+	if err := Create(dir, key, salt, testParams); err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
 	return New(dir, key), dir
@@ -51,18 +55,82 @@ func TestCreateRefusesToOverwriteAnExistingVault(t *testing.T) {
 	salt, _ := crypto.NewSalt()
 	key := make([]byte, crypto.KeyLen)
 
-	if err := Create(dir, key, salt); err == nil {
+	if err := Create(dir, key, salt, testParams); err == nil {
 		t.Fatal("Create() error = nil, want an error on an existing vault")
 	}
 }
 
-func TestSaveLoadRoundTrip(t *testing.T) {
-	v, _ := newTestVault(t)
-	c, _ := v.Load()
-	c.Add(model.Bookmark{URL: "https://example.com", Tags: []string{"rust"}})
+// An init that dies before it publishes must leave nothing behind. A
+// half-written vault file would be worse than no vault at all: every command
+// would report it corrupt, and bkmr init - which only checks Exists() - would
+// refuse to replace it, leaving the user with no way forward but deleting a file
+// by hand.
+func TestAnInterruptedCreateLeavesNothingBehind(t *testing.T) {
+	dir := t.TempDir()
+	salt, err := crypto.NewSalt()
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := crypto.DeriveKey([]byte("pw"), salt, testParams)
 
-	if err := v.Save(c); err != nil {
-		t.Fatalf("Save() error = %v", err)
+	old := renameFile
+	renameFile = func(string, string) error { return errors.New("injected rename failure") }
+	err = Create(dir, key, salt, testParams)
+	renameFile = old
+	if err == nil {
+		t.Fatal("Create() error = nil, want the injected failure")
+	}
+
+	if Exists(dir) {
+		t.Error("Exists() = true after an interrupted Create(); a vault that cannot be opened must not block init")
+	}
+	if _, err := os.Stat(filepath.Join(dir, FileName+".tmp")); !os.IsNotExist(err) {
+		t.Error("Create() left a .tmp file behind")
+	}
+
+	// And the failure must not be terminal: init has to be able to try again.
+	if err := Create(dir, key, salt, testParams); err != nil {
+		t.Fatalf("Create() after an interrupted Create error = %v", err)
+	}
+	v := New(dir, key)
+	if _, err := v.Load(); err != nil {
+		t.Fatalf("Load() after the retry error = %v", err)
+	}
+}
+
+// The remaining window is one rename wide: the reservation that stops two
+// writers creating a vault at once is an empty file, and being killed between
+// making it and renaming the sealed vault over it leaves that empty file on
+// disk. It is not a vault - Seal cannot produce zero bytes - so nothing may
+// treat it as one.
+func TestAnEmptyVaultFileIsNotAVault(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, FileName), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if Exists(dir) {
+		t.Error("Exists() = true for a zero-byte vault file, which no Seal can produce")
+	}
+
+	salt, _ := crypto.NewSalt()
+	key := crypto.DeriveKey([]byte("pw"), salt, testParams)
+	if err := Create(dir, key, salt, testParams); err != nil {
+		t.Fatalf("Create() over a zero-byte vault file error = %v, want it reclaimed", err)
+	}
+	if _, err := New(dir, key).Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+}
+
+func TestMutateLoadRoundTrip(t *testing.T) {
+	v, _ := newTestVault(t)
+
+	if err := v.Mutate(func(c *model.Collection) error {
+		c.Add(model.Bookmark{URL: "https://example.com", Tags: []string{"rust"}})
+		return nil
+	}); err != nil {
+		t.Fatalf("Mutate() error = %v", err)
 	}
 	got, err := v.Load()
 	if err != nil {
@@ -73,11 +141,12 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 }
 
-func TestSaveLeavesTheOldVaultAsBackup(t *testing.T) {
+func TestMutateLeavesTheOldVaultAsBackup(t *testing.T) {
 	v, dir := newTestVault(t)
-	c, _ := v.Load()
-	c.Add(model.Bookmark{URL: "https://first.example"})
-	if err := v.Save(c); err != nil {
+	if err := v.Mutate(func(c *model.Collection) error {
+		c.Add(model.Bookmark{URL: "https://first.example"})
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	afterFirst, err := os.ReadFile(v.Path())
@@ -85,8 +154,10 @@ func TestSaveLeavesTheOldVaultAsBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	c.Add(model.Bookmark{URL: "https://second.example"})
-	if err := v.Save(c); err != nil {
+	if err := v.Mutate(func(c *model.Collection) error {
+		c.Add(model.Bookmark{URL: "https://second.example"})
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -98,10 +169,10 @@ func TestSaveLeavesTheOldVaultAsBackup(t *testing.T) {
 		t.Error("backup does not match the previous vault contents")
 	}
 	if _, err := os.Stat(v.Path() + ".tmp"); !os.IsNotExist(err) {
-		t.Error("Save() left a .tmp file behind")
+		t.Error("Mutate() left a .tmp file behind")
 	}
 	if _, err := os.Stat(v.Path() + ".bak.tmp"); !os.IsNotExist(err) {
-		t.Error("Save() left a .bak.tmp file behind")
+		t.Error("Mutate() left a .bak.tmp file behind")
 	}
 }
 
@@ -126,7 +197,7 @@ func TestLoadOnATruncatedVaultFails(t *testing.T) {
 	}
 }
 
-func TestSaveReportsBusyWhenTheLockIsHeld(t *testing.T) {
+func TestMutateReportsBusyWhenTheLockIsHeld(t *testing.T) {
 	v, dir := newTestVault(t)
 	lock, err := os.OpenFile(filepath.Join(dir, "vault.lock"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -135,20 +206,20 @@ func TestSaveReportsBusyWhenTheLockIsHeld(t *testing.T) {
 	defer os.Remove(lock.Name())
 	lock.Close()
 
-	c := &model.Collection{Version: model.Version}
-	if err := v.Save(c); !errors.Is(err, ErrBusy) {
-		t.Errorf("Save() error = %v, want ErrBusy", err)
+	if err := v.Mutate(func(*model.Collection) error { return nil }); !errors.Is(err, ErrBusy) {
+		t.Errorf("Mutate() error = %v, want ErrBusy", err)
 	}
 }
 
-// A Save that dies on the final rename must leave the vault openable. If it
+// A write that dies on the final rename must leave the vault openable. If it
 // left no vault file at all, the next command would report "no vault found"
 // and bkmr init would create a fresh empty one on top of the user's data.
-func TestFailedSaveLeavesAnOpenableVault(t *testing.T) {
+func TestFailedWriteLeavesAnOpenableVault(t *testing.T) {
 	v, _ := newTestVault(t)
-	c, _ := v.Load()
-	c.Add(model.Bookmark{URL: "https://original.example"})
-	if err := v.Save(c); err != nil {
+	if err := v.Mutate(func(c *model.Collection) error {
+		c.Add(model.Bookmark{URL: "https://original.example"})
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -156,34 +227,38 @@ func TestFailedSaveLeavesAnOpenableVault(t *testing.T) {
 	renameFile = func(string, string) error { return errors.New("injected rename failure") }
 	defer func() { renameFile = old }()
 
-	c.Add(model.Bookmark{URL: "https://doomed.example"})
-	if err := v.Save(c); err == nil {
-		t.Fatal("Save() error = nil, want the injected failure")
+	if err := v.Mutate(func(c *model.Collection) error {
+		c.Add(model.Bookmark{URL: "https://doomed.example"})
+		return nil
+	}); err == nil {
+		t.Fatal("Mutate() error = nil, want the injected failure")
 	}
 
 	renameFile = old
 	got, err := v.Load()
 	if err != nil {
-		t.Fatalf("vault is not loadable after a failed Save: %v", err)
+		t.Fatalf("vault is not loadable after a failed write: %v", err)
 	}
 	if len(got.Bookmarks) != 1 || got.Bookmarks[0].URL != "https://original.example" {
 		t.Errorf("Bookmarks = %+v, want only the original bookmark", got.Bookmarks)
 	}
 	if _, err := os.Stat(v.Path() + ".tmp"); !os.IsNotExist(err) {
-		t.Error("the failed Save() left a .tmp file behind")
+		t.Error("the failed write left a .tmp file behind")
 	}
 
-	// The failure must not be terminal: the next Save has to work.
-	got.Add(model.Bookmark{URL: "https://recovered.example"})
-	if err := v.Save(got); err != nil {
-		t.Fatalf("Save() after a failed Save error = %v", err)
+	// The failure must not be terminal: the next write has to work.
+	if err := v.Mutate(func(c *model.Collection) error {
+		c.Add(model.Bookmark{URL: "https://recovered.example"})
+		return nil
+	}); err != nil {
+		t.Fatalf("Mutate() after a failed write error = %v", err)
 	}
 	again, err := v.Load()
 	if err != nil {
 		t.Fatalf("Load() after recovering error = %v", err)
 	}
 	if len(again.Bookmarks) != 2 {
-		t.Errorf("len(Bookmarks) = %d, want 2 after a successful Save follows a failed one", len(again.Bookmarks))
+		t.Errorf("len(Bookmarks) = %d, want 2 after a successful write follows a failed one", len(again.Bookmarks))
 	}
 }
 

@@ -21,8 +21,9 @@ const FileName = "vault.bkmr"
 // ErrBusy means another bkmr process holds the write lock.
 var ErrBusy = errors.New("vault is busy - another bkmr is writing to it")
 
-// renameFile is a seam so a test can fail the one rename that publishes a new
-// vault. It is never reassigned outside tests, and a test that swaps it must
+// renameFile is a seam so a test can fail a rename that publishes a vault -
+// Create's and write's both, which is how the tests simulate an interrupted
+// write. It is never reassigned outside tests, and a test that swaps it must
 // not call t.Parallel() or run alongside anything else in this package: it is a
 // plain package-level variable with no synchronisation, so concurrent use would
 // be a genuine data race the moment CI runs with -race.
@@ -46,53 +47,100 @@ func (v *Vault) Path() string { return filepath.Join(v.dir, FileName) }
 // fault means we cannot prove there is no vault, and answering false would let
 // bkmr init - which consults nothing else - create a fresh empty vault on top of
 // a real one.
+//
+// A zero-byte file is the one other thing that counts as absent, and it is not
+// an exception to that rule so much as an application of it: crypto.Seal cannot
+// produce zero bytes - a sealed vault is a header, a nonce and a tag before it
+// holds anything at all - so an empty vault.bkmr is not a vault whose contents
+// we might destroy. It is the reservation Create makes before it publishes,
+// left behind by an init that was killed in the one rename between the two. See
+// emptyFile.
 func Exists(dir string) bool {
-	_, err := os.Stat(filepath.Join(dir, FileName))
-	return !errors.Is(err, fs.ErrNotExist)
+	path := filepath.Join(dir, FileName)
+	info, err := os.Stat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	if err == nil && emptyFile(info) {
+		return false
+	}
+	return true
 }
+
+// emptyFile reports whether info describes a regular file of no bytes. It is the
+// one predicate for "a reservation Create left behind rather than a vault", so
+// that Exists and Create cannot come to disagree about what they are looking at:
+// a file Exists calls absent is a file Create is entitled to replace, and the
+// two answers have to be the same answer.
+func emptyFile(info fs.FileInfo) bool { return info.Mode().IsRegular() && info.Size() == 0 }
 
 // Create writes a new empty vault. It refuses to overwrite an existing one.
 //
-// The new vault's header records crypto.Default, so the caller must have
-// derived key with crypto.Default and the same salt. Nothing in this signature
-// enforces that: a caller who derives with different parameters writes a file
-// whose header disagrees with its own key derivation, and every later unlock -
-// which reads the parameters back out of the header - would derive a different
-// key and be told the vault is corrupt.
-func Create(dir string, key, salt []byte) error {
+// params goes into the file header and must be the parameters key was derived
+// with. Passing it rather than documenting "derive with crypto.Default" is the
+// point: a header that disagrees with its own key derivation produces a vault
+// that no later unlock can open - every unlock reads the parameters back out of
+// the header - and a defect that severe should not be left to a caller
+// remembering a comment. The same reasoning put one bounds predicate behind both
+// Seal and Open.
+func Create(dir string, key, salt []byte, params crypto.Params) error {
 	path := filepath.Join(dir, FileName)
 	plain, err := json.Marshal(&model.Collection{Version: model.Version, Bookmarks: []model.Bookmark{}})
 	if err != nil {
 		return err
 	}
-	blob, err := crypto.Seal(key, plain, crypto.Default, salt)
+	blob, err := crypto.Seal(key, plain, params, salt)
 	if err != nil {
 		return err
 	}
 
-	// O_EXCL, not Stat-then-write. The refusal has to be the same syscall as the
-	// create: with a separate check, a vault that came into existence in the gap
-	// would be truncated to a fresh empty collection, and the user's bookmarks
-	// would be gone with no error to show for it. Sealing first also means a
-	// failure there leaves no file behind at all.
+	// Sealed and written in full before anything claims the vault's own name, then
+	// renamed into place, exactly as write does. The old protocol wrote the blob
+	// straight into the file that O_EXCL had just created, so an init killed
+	// partway through - during the fsync, most likely, which is the slow part -
+	// left a short vault.bkmr behind. Every command would then call that file
+	// corrupt, and bkmr init would refuse to replace it, because Exists() was the
+	// only thing it consulted: a mistyped Ctrl-C and the user is stuck deleting a
+	// file by hand.
+	tmp := path + ".tmp"
+	if err := writeFileSynced(tmp, blob); err != nil {
+		return err
+	}
+
+	// The refusal stays a single syscall rather than becoming a Stat and a
+	// rename. O_EXCL is what makes it atomic: with a separate check, a vault that
+	// came into existence in the gap would be replaced by a fresh empty
+	// collection, and the user's bookmarks would be gone with no error to show
+	// for it. What the O_EXCL creates is an empty reservation, and the rename
+	// below replaces it with the real thing.
+	//
+	// An existing empty file is that same reservation from an init that died in
+	// the window between these two steps. It is not a vault - see emptyFile - so
+	// it is reclaimed rather than treated as somebody's bookmarks.
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		if os.IsExist(err) {
+	switch {
+	case err == nil:
+		if err := f.Close(); err != nil {
+			os.Remove(tmp)
+			os.Remove(path)
+			return err
+		}
+	case os.IsExist(err):
+		info, statErr := os.Stat(path)
+		if statErr != nil || !emptyFile(info) {
+			os.Remove(tmp)
 			return fmt.Errorf("a vault already exists at %s", path)
 		}
+	default:
+		os.Remove(tmp)
 		return err
 	}
-	if _, err := f.Write(blob); err != nil {
-		f.Close()
-		os.Remove(path)
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		os.Remove(path)
-		return err
-	}
-	if err := f.Close(); err != nil {
+
+	if err := renameFile(tmp, path); err != nil {
+		os.Remove(tmp)
+		// The reservation goes too. Leaving it would mean Exists() reports a
+		// vault that cannot be opened, which is the state this whole protocol
+		// exists to avoid.
 		os.Remove(path)
 		return err
 	}
@@ -116,25 +164,24 @@ func (v *Vault) Load() (*model.Collection, error) {
 	return &c, nil
 }
 
-// Save encrypts and atomically replaces the vault, keeping one backup. It
-// reuses the salt and KDF parameters already in the file so a cached key
-// stays valid.
-func (v *Vault) Save(c *model.Collection) error {
-	release, err := v.lock()
-	if err != nil {
-		return err
-	}
-	defer release()
-	return v.write(c)
-}
-
 // Mutate reloads the vault under the write lock, applies fn, and saves the
-// result. Every writer must use this rather than Load-then-Save, or a
-// concurrent add made in between would be silently discarded.
+// result. It is the only way to write the vault, deliberately: there is no
+// Load-then-Save pair, because a concurrent add made in between would be
+// silently discarded, and because the Load here is what keeps a wrong key from
+// destroying the vault.
 //
-// fn must not call Save or Mutate itself. The lock is a plain file-creation
-// lock with no reentrancy, so a nested writer would spin against a lock this
-// same goroutine is holding and return ErrBusy a second later.
+// That second property is not obvious and is worth stating. keyFor in cmd/bkmr
+// derives a key from a typed password without verifying it - only 'bkmr unlock'
+// verifies - so the key this Vault holds may be wrong, and nothing in the write
+// path can tell. Load is what finds out: it fails with crypto.ErrBadVault before
+// fn runs and before anything is written. A writer that skipped the Load would
+// reseal a collection under the wrong key and rename it over the user's vault,
+// turning one mistyped password into total data loss. So there is exactly one
+// way in.
+//
+// fn must not call Mutate itself. The lock is a plain file-creation lock with no
+// reentrancy, so a nested writer would spin against a lock this same goroutine
+// is holding and return ErrBusy a second later.
 func (v *Vault) Mutate(fn func(*model.Collection) error) error {
 	release, err := v.lock()
 	if err != nil {
@@ -152,8 +199,8 @@ func (v *Vault) Mutate(fn func(*model.Collection) error) error {
 	return v.write(c)
 }
 
-// write seals c and replaces the vault file. Save and Mutate both end here, so
-// this is the one point every writer passes through - which is why c.Clean() is
+// write seals c and replaces the vault file. Mutate is its only caller, so this
+// is the one point every writer passes through - which is why c.Clean() is
 // called here rather than left to each command.
 //
 // model.Collection.Add cleans control characters out of a bookmark it inserts,
@@ -196,22 +243,7 @@ func (v *Vault) write(c *model.Collection) error {
 	}
 
 	tmp := v.Path() + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(sealed); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(tmp)
+	if err := writeFileSynced(tmp, sealed); err != nil {
 		return err
 	}
 	// Copy the current vault to .bak rather than renaming it there. A rename
@@ -248,26 +280,43 @@ func (v *Vault) write(c *model.Collection) error {
 // ever reached the step it means to exercise.
 func writeBackup(path string, data []byte) error {
 	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err := writeFileSynced(tmp, data); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+// writeFileSynced writes data to path in full, fsyncs it, and removes the file
+// again if any step fails, so a caller that is about to rename it into place can
+// treat success as "the bytes are on the disk" and failure as "nothing is".
+//
+// One copy rather than three: Create, write and writeBackup all need exactly
+// this, and the sequence is easy to get subtly wrong - an fsync that is skipped,
+// a handle that is not closed on the error path, a temp file left behind for the
+// next run to trip over. It does not rename anything; each caller publishes its
+// own way, which is the one part of the protocol that genuinely differs between
+// them.
+func writeFileSynced(path string, data []byte) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
 	if _, err := f.Write(data); err != nil {
 		f.Close()
-		os.Remove(tmp)
+		os.Remove(path)
 		return err
 	}
 	if err := f.Sync(); err != nil {
 		f.Close()
-		os.Remove(tmp)
+		os.Remove(path)
 		return err
 	}
 	if err := f.Close(); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
+		os.Remove(path)
 		return err
 	}
 	return nil

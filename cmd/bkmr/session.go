@@ -88,5 +88,21 @@ func explainVaultError(err error) error {
 	if errors.As(err, &le) {
 		return fmt.Errorf("could not replace %s: %w - something else has the file open; close it and try again", le.New, le.Err)
 	}
+	// A vault that will not open is the one failure a user can meet with no idea
+	// what to do next, and bkmr has been keeping the previous contents in
+	// vault.bkmr.bak the whole time without ever mentioning it. This is where they
+	// meet the failure, so this is where the pointer belongs.
+	//
+	// Conditional on nothing, and phrased as an "if". crypto.ErrBadVault names
+	// both causes in one sentence on purpose - a wrong password and a damaged file
+	// are told apart by nothing bkmr prints - because a message that distinguished
+	// them would confirm to whoever holds the file that a given password was
+	// merely wrong. Appending advice only when the file is genuinely corrupt would
+	// rebuild exactly that oracle, so the advice is appended always and the
+	// judgement about which case this is stays with the user.
+	if errors.Is(err, crypto.ErrBadVault) {
+		return fmt.Errorf("%w; if you believe the file is damaged, %s.bak holds the previous contents - copy it over %s and try again",
+			err, store.FileName, store.FileName)
+	}
 	return err
 }

@@ -44,12 +44,13 @@ func runInit([]string) error {
 	if err != nil {
 		return err
 	}
-	// crypto.Default, and nothing else: store.Create stamps Default into the
-	// file header, and every later unlock derives from the parameters it reads
-	// back out of that header. Derive with anything else here and the vault
-	// would be unopenable by its own password.
-	key := crypto.DeriveKey(pw, salt, crypto.Default)
-	if err := store.Create(dir, key, salt); err != nil {
+	// One crypto.Params value, used for the derivation and handed to Create for
+	// the header, so the two cannot drift: every later unlock derives from the
+	// parameters it reads back out of that header, and a header that disagrees
+	// with the derivation would leave the vault unopenable by its own password.
+	params := crypto.Default
+	key := crypto.DeriveKey(pw, salt, params)
+	if err := store.Create(dir, key, salt, params); err != nil {
 		return err
 	}
 	// A keychain that will not take the key is not a reason to throw the vault

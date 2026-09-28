@@ -383,3 +383,31 @@ func TestVaultErrorsAreExplainedRatherThanDumped(t *testing.T) {
 		t.Errorf("explainVaultError(%v) = %v, want it passed through untouched", other, got)
 	}
 }
+
+// A vault that will not open is the one failure with no way forward in the
+// message: bkmr keeps the previous contents in vault.bkmr.bak and never said so.
+//
+// The no-oracle rule stays. crypto.ErrBadVault deliberately names both causes at
+// once - a wrong password and a damaged file get the same sentence - because a
+// message that told them apart would confirm to whoever holds the file that a
+// given password was the wrong one rather than the file being broken. The
+// pointer added here has to be conditional on nothing, which is why it is
+// phrased as an "if".
+func TestBadVaultErrorOffersTheBackup(t *testing.T) {
+	got := explainVaultError(fmt.Errorf("load: %w", crypto.ErrBadVault))
+
+	if !errors.Is(got, crypto.ErrBadVault) {
+		t.Fatalf("explainVaultError dropped ErrBadVault from the chain: %v", got)
+	}
+	msg := got.Error()
+	if !strings.Contains(msg, store.FileName+".bak") {
+		t.Errorf("ErrBadVault = %q, want it to point at the %s.bak copy of the previous contents", msg, store.FileName)
+	}
+	// Both causes still named, neither singled out: the text must not become an
+	// oracle for "the password was wrong".
+	for _, want := range []string{"wrong password", "corrupt"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("ErrBadVault = %q, want it to still say %q - the two causes must stay indistinguishable", msg, want)
+		}
+	}
+}
