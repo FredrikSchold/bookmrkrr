@@ -152,7 +152,21 @@ func (v *Vault) Mutate(fn func(*model.Collection) error) error {
 	return v.write(c)
 }
 
+// write seals c and replaces the vault file. Save and Mutate both end here, so
+// this is the one point every writer passes through - which is why c.Clean() is
+// called here rather than left to each command.
+//
+// model.Collection.Add cleans control characters out of a bookmark it inserts,
+// but an insert is not the only way text reaches the vault: Find returns a
+// writable *Bookmark and 'bkmr edit' assigns straight through it. Asking every
+// present and future writer to remember model.CleanTitle is a rule that lapses;
+// cleaning at the gate is a rule that cannot. This does not make store know
+// anything new about bookmarks - what "clean" means stays entirely inside
+// model - it only declines to encrypt a collection that has not been asked to
+// tidy itself first.
 func (v *Vault) write(c *model.Collection) error {
+	c.Clean()
+
 	blob, err := os.ReadFile(v.Path())
 	if err != nil {
 		return err

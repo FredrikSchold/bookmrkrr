@@ -1,6 +1,8 @@
 package model
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -390,5 +392,87 @@ func TestVerticalTabAndFormFeedBecomeSpaces(t *testing.T) {
 				t.Errorf("NormalizeTags(%q) = %q, want [two-words]", tt.in, tags)
 			}
 		})
+	}
+}
+
+// Clean is the structural half of the control-character rule: Add cleans one
+// bookmark on the way in, and this cleans whatever a writer assembled by hand -
+// which is what 'bkmr edit' does, through the *Bookmark that Find hands out.
+func TestCleanNormalizesEveryStoredString(t *testing.T) {
+	c := Collection{Version: Version, Bookmarks: []Bookmark{
+		{ID: "a", URL: "https://a.example", Title: "Red \x1b[31mThing", Notes: "line\x07one\nline two", Tags: []string{"Web", "web", " two words "}},
+	}}
+	c.Clean()
+
+	b := c.Bookmarks[0]
+	if want := "Red [31mThing"; b.Title != want {
+		t.Errorf("Title = %q, want %q", b.Title, want)
+	}
+	if want := "lineone\nline two"; b.Notes != want {
+		t.Errorf("Notes = %q, want %q - a note keeps its line breaks", b.Notes, want)
+	}
+	if got, want := strings.Join(b.Tags, ","), "two-words,web"; got != want {
+		t.Errorf("Tags = %q, want %q", got, want)
+	}
+}
+
+func TestCleanIsIdempotent(t *testing.T) {
+	c := Collection{Bookmarks: []Bookmark{{Title: "A \x1b B", Notes: "n\x00o", Tags: []string{"T"}}}}
+	c.Clean()
+	first := c.Bookmarks[0]
+	c.Clean()
+	if c.Bookmarks[0].Title != first.Title || c.Bookmarks[0].Notes != first.Notes {
+		t.Errorf("Clean() twice = %+v, want %+v", c.Bookmarks[0], first)
+	}
+}
+
+func TestAddAllMergesAgainstTheVaultAndWithinTheBatch(t *testing.T) {
+	c := Collection{Version: Version}
+	c.Add(Bookmark{URL: "https://shared.example", Tags: []string{"mine"}})
+
+	added, merged, skipped := c.AddAll([]Bookmark{
+		{URL: "https://shared.example/?utm_source=x", Tags: []string{"theirs"}},
+		{URL: "https://new.example"},
+		{URL: "https://new.example", Notes: "second sighting"},
+		{URL: "javascript:void(0)"},
+	})
+
+	if added != 1 || merged != 2 || skipped != 1 {
+		t.Errorf("AddAll() = (%d, %d, %d), want (1, 2, 1)", added, merged, skipped)
+	}
+	if len(c.Bookmarks) != 2 {
+		t.Fatalf("len(Bookmarks) = %d, want 2", len(c.Bookmarks))
+	}
+	if got := strings.Join(c.Bookmarks[0].Tags, ","); got != "mine,theirs" {
+		t.Errorf("Tags = %q, want the incoming tag merged in", got)
+	}
+	if c.Bookmarks[1].Notes != "second sighting" {
+		t.Errorf("Notes = %q, want the batch's own duplicate merged into the entry it just created", c.Bookmarks[1].Notes)
+	}
+}
+
+// Add re-normalizes every stored URL on every insert, so calling it in a loop is
+// quadratic: a browser export of tens of thousands of bookmarks would take
+// minutes. AddAll builds the normalized-URL index once. The bound is generous
+// because it is not measuring speed, only the shape of the growth - the linear
+// version of this runs in tens of milliseconds, and the quadratic one takes
+// minutes.
+func TestAddAllDoesNotRescanThePreviousInsert(t *testing.T) {
+	const n = 20000
+	in := make([]Bookmark, n)
+	for i := range in {
+		in[i] = Bookmark{URL: fmt.Sprintf("https://bulk.example/%d", i)}
+	}
+
+	c := Collection{Version: Version}
+	start := time.Now()
+	added, merged, skipped := c.AddAll(in)
+	elapsed := time.Since(start)
+
+	if added != n || merged != 0 || skipped != 0 {
+		t.Fatalf("AddAll() = (%d, %d, %d), want (%d, 0, 0)", added, merged, skipped, n)
+	}
+	if elapsed > 30*time.Second {
+		t.Errorf("importing %d bookmarks took %v - AddAll is scanning the collection per insert", n, elapsed)
 	}
 }

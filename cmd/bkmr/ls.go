@@ -90,8 +90,17 @@ func filterByTag(all []model.Bookmark, tag string) []model.Bookmark {
 }
 
 // formatRow renders one bookmark as a single stdout line.
+//
+// A bookmark with no title gets two columns rather than three. label() falls
+// back to the URL and the row ends with the URL, so the third column would have
+// been the second one again - and a titleless bookmark is not rare: --no-fetch,
+// a fetch that failed, and a browser import all produce them. The tab picker's
+// save line made the same call.
 func formatRow(b model.Bookmark) string {
-	row := fmt.Sprintf("%s  %s  %s", b.ID, label(b), b.URL)
+	row := fmt.Sprintf("%s  %s", b.ID, label(b))
+	if b.Title != "" {
+		row += "  " + b.URL
+	}
 	if len(b.Tags) > 0 {
 		row += "  [" + strings.Join(b.Tags, " ") + "]"
 	}

@@ -144,11 +144,67 @@ func NormalizeTags(in []string) []string {
 
 // Add stores a bookmark, or merges it into an existing entry with the same
 // normalized URL. The second return value reports whether a merge happened.
-//
-// Every title and note that enters the vault passes through here, so this is
-// where they are cleaned - once, before either branch below, so the merge path
-// cannot be the door the new-bookmark path is not. See isControl.
 func (c *Collection) Add(b Bookmark) (Bookmark, bool, error) {
+	return c.add(b, c.index())
+}
+
+// AddAll stores many bookmarks, merging each into an existing entry - or into an
+// earlier entry of the same batch - with the same normalized URL. It reports how
+// many were added, how many merged, and how many were skipped because their URL
+// was not one this tool stores.
+//
+// It exists because Add is O(n) in what the vault already holds: it normalizes
+// every stored URL to find a duplicate, which is nothing for one interactive add
+// and quadratic for a bulk import. A browser export of tens of thousands of
+// bookmarks put through Add in a loop takes minutes. The index is built once
+// here and carried through the whole batch instead.
+//
+// A URL that will not normalize is skipped rather than fatal: one bad line in
+// somebody's twenty-thousand-line export must not throw the other nineteen
+// thousand away.
+func (c *Collection) AddAll(in []Bookmark) (added, merged, skipped int) {
+	idx := c.index()
+	for _, b := range in {
+		_, wasMerged, err := c.add(b, idx)
+		switch {
+		case err != nil:
+			skipped++
+		case wasMerged:
+			merged++
+		default:
+			added++
+		}
+	}
+	return added, merged, skipped
+}
+
+// index maps each stored bookmark's normalized URL to its position. A URL that
+// will not normalize has no duplicates to find and is left out. The first entry
+// wins where two stored bookmarks somehow normalize alike, which is what the
+// linear scan this replaced did.
+func (c *Collection) index() map[string]int {
+	idx := make(map[string]int, len(c.Bookmarks))
+	for i := range c.Bookmarks {
+		key, err := NormalizeURL(c.Bookmarks[i].URL)
+		if err != nil {
+			continue
+		}
+		if _, dup := idx[key]; !dup {
+			idx[key] = i
+		}
+	}
+	return idx
+}
+
+// add is the shared body of Add and AddAll. idx must describe c.Bookmarks as it
+// is now; add keeps it that way, so a batch can reuse one map.
+//
+// Every title and note that enters the vault through an insert passes through
+// here, so this is where they are cleaned - once, before either branch below, so
+// the merge path cannot be the door the new-bookmark path is not. An insert is
+// not the only door, though: Find hands out a writable *Bookmark. Clean is what
+// covers the rest. See isControl.
+func (c *Collection) add(b Bookmark, idx map[string]int) (Bookmark, bool, error) {
 	key, err := NormalizeURL(b.URL)
 	if err != nil {
 		return Bookmark{}, false, err
@@ -157,11 +213,7 @@ func (c *Collection) Add(b Bookmark) (Bookmark, bool, error) {
 	b.Title = CleanTitle(b.Title)
 	b.Notes = cleanNotes(b.Notes)
 
-	for i := range c.Bookmarks {
-		existing, err := NormalizeURL(c.Bookmarks[i].URL)
-		if err != nil || existing != key {
-			continue
-		}
+	if i, ok := idx[key]; ok {
 		c.Bookmarks[i].Tags = NormalizeTags(append(c.Bookmarks[i].Tags, b.Tags...))
 		if c.Bookmarks[i].Title == "" {
 			c.Bookmarks[i].Title = b.Title
@@ -182,8 +234,32 @@ func (c *Collection) Add(b Bookmark) (Bookmark, bool, error) {
 	if b.Added.IsZero() {
 		b.Added = time.Now().UTC()
 	}
+	idx[key] = len(c.Bookmarks)
 	c.Bookmarks = append(c.Bookmarks, b)
 	return b, false, nil
+}
+
+// Clean applies this package's storage rules to every bookmark it holds, so that
+// a collection about to be persisted carries no control characters and no
+// malformed tags however it was assembled. It is idempotent.
+//
+// add cleans one bookmark on the way in, which was the whole rule while an
+// insert was the only way text reached the vault. It is not: Find returns a
+// writable *Bookmark, and 'bkmr edit' sets a title through it without passing
+// through add at all. CleanTitle is exported so an editing path can reach the
+// rule, but that makes the rule a convention - it holds for as long as every
+// future writer remembers it, which is another way of saying it will lapse.
+//
+// So internal/store calls this on the write path, the one place every writer has
+// to pass through. A command that prints what it wrote before the write happens
+// still has to clean that text itself, because this guards what is stored rather
+// than what is printed.
+func (c *Collection) Clean() {
+	for i := range c.Bookmarks {
+		c.Bookmarks[i].Title = CleanTitle(c.Bookmarks[i].Title)
+		c.Bookmarks[i].Notes = cleanNotes(c.Bookmarks[i].Notes)
+		c.Bookmarks[i].Tags = NormalizeTags(c.Bookmarks[i].Tags)
+	}
 }
 
 // Find returns a pointer to the bookmark with the given id.
@@ -285,12 +361,12 @@ func dropControls(s string, keepLines bool) string {
 // CleanTitle makes one line of text safe to store and to print: control
 // characters go, and the whitespace that is left collapses to single spaces.
 //
-// It is exported for the two places that need the rule before Add can apply it.
-// The tab picker shows a browser-supplied title on screen before anything is
+// It is exported for the two places that need the rule before storage can apply
+// it. The tab picker shows a browser-supplied title on screen before anything is
 // saved, so cleaning at storage time would be too late for the frame the picker
-// draws; and Find hands out a writable *Bookmark, so an editing path has to be
-// able to reach the same rule rather than inventing a second one. It is
-// idempotent, so applying it early costs nothing.
+// draws; and 'bkmr edit' echoes the new title back on the line that reports the
+// change, which is also before the write. What gets stored is Clean's job, not
+// this function's. It is idempotent, so applying it early costs nothing.
 func CleanTitle(s string) string {
 	return strings.Join(strings.Fields(dropControls(s, false)), " ")
 }

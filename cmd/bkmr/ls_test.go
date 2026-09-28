@@ -155,3 +155,21 @@ func TestLsShowsTheURLWhenThereIsNoTitle(t *testing.T) {
 		t.Errorf("runLs() = %q, want the URL used as the label", got)
 	}
 }
+
+// label() falls back to the URL when there is no title, and formatRow ends with
+// the URL, so a titleless bookmark used to print it twice on one line. The tab
+// picker's save line already dropped the redundant column; ls does the same.
+func TestLsPrintsTheURLOnceWhenThereIsNoTitle(t *testing.T) {
+	newVaultForTest(t, "pw")
+	addForTest(t, "https://untitled.example/page")
+
+	got := capture(t, func() {
+		if err := runLs(nil); err != nil {
+			t.Fatalf("runLs() error = %v", err)
+		}
+	})
+
+	if n := strings.Count(got, "https://untitled.example/page"); n != 1 {
+		t.Errorf("runLs() = %q, want the URL exactly once, got it %d times", got, n)
+	}
+}
