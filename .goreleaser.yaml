@@ -12,8 +12,11 @@ builds:
     binary: bkmr
     env:
       - CGO_ENABLED=0
+    # -X main.version, or every tagged binary would report whatever string was
+    # last committed in main.go and 'bkmr version' would be a lie in exactly the
+    # situation it matters: a bug report from a released build.
     ldflags:
-      - -s -w
+      - -s -w -X main.version={{.Version}}
     goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
 

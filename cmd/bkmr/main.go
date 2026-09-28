@@ -10,7 +10,12 @@ import (
 	"os"
 )
 
-const version = "0.1.0"
+// version is what 'bkmr version' prints. A var, not a const, because the release
+// build overwrites it: .goreleaser.yaml passes -X main.version={{.Version}}, so a
+// tagged binary reports the tag it was cut from rather than whatever string was
+// last committed here. The value below is what a 'go install' or a local build
+// reports, and it is the development version - a released binary never uses it.
+var version = "0.1.0-dev"
 
 // out receives user-facing program output; errOut receives diagnostics.
 // Both are variables so tests can capture them.

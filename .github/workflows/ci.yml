@@ -63,10 +63,26 @@ jobs:
       # staticcheck and govulncheck are installed as tools, never added to
       # go.mod, so they do not count against the dependency budget that
       # internal/boundary enforces.
-      - run: go install honnef.co/go/tools/cmd/staticcheck@latest
+      #
+      # staticcheck is pinned. At @latest a new release can turn this repository
+      # red with no contributor change, and CONTRIBUTING says in as many words
+      # that a failing check is not to be loosened to get past it - which puts a
+      # contributor between an unrelated red build and a rule. Bump this line
+      # deliberately, as its own commit, and fix what the new version finds.
+      - run: go install honnef.co/go/tools/cmd/staticcheck@v0.6.1
       - run: staticcheck ./...
+      # govulncheck stays at @latest on purpose, and for the opposite reason: what
+      # it reports comes from a vulnerability database that is meant to be newer
+      # than the pin. A stale vulnerability scanner is not a stable one.
       - run: go install golang.org/x/vuln/cmd/govulncheck@latest
       - run: govulncheck ./...
+      # goreleaser's config is validated on every push rather than first
+      # discovered to be wrong at tag time, when the fix costs a new tag. The v2
+      # 'formats:' spelling is the sort of thing this catches.
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: check
 
   cross-compile:
     runs-on: ubuntu-latest
