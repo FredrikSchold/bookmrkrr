@@ -1,0 +1,38 @@
+version: 2
+
+project_name: bkmr
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: bkmr
+    main: ./cmd/bkmr
+    binary: bkmr
+    env:
+      - CGO_ENABLED=0
+    # -X main.version, or every tagged binary would report whatever string was
+    # last committed in main.go and 'bkmr version' would be a lie in exactly the
+    # situation it matters: a bug report from a released build.
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+
+archives:
+  - formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+      - LICENSE
+      - SECURITY.md
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github
+  sort: asc

@@ -12,8 +12,8 @@ format, and scope.
 refactoring, fixing, reviewing, or designing code, and whenever choosing a
 library or dependency. The laziest solution that actually works wins. Question
 whether the code needs to exist, reach for the standard library before a
-dependency, one line before fifty. This repo has a deliberate eight-dependency
-budget (spec section 12); adding a ninth needs a justification in the PR.
+dependency, one line before fifty. This repo has a deliberate nine-dependency
+budget (spec section 12); adding a tenth needs a justification in the PR.
 
 **Invoke `caveman` for communication.** Default intensity. Keep replies short
 and dense; full technical accuracy, minimal prose.

@@ -1,0 +1,39 @@
+name: release
+
+# The README promises binaries for six platforms with a checksums.txt beside
+# them on every release. Nothing ran goreleaser, so that promise was a config
+# file nobody executed. This is what keeps it.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  # goreleaser uploads the archives and the checksum file to the release, which
+  # is a write to the repository's contents. Nothing else here needs more.
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # goreleaser derives the version and the changelog from tag history, and
+          # a shallow clone has none of it.
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          check-latest: true
+      # The suite runs against the exact commit being released. A tag that cannot
+      # pass its own tests must not become six downloadable binaries.
+      - run: go test ./... -count=1
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
